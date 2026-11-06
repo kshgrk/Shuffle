@@ -652,14 +652,37 @@ func handleRegister(resp http.ResponseWriter, request *http.Request) {
 
 			// Get the user
 			users, err := shuffle.FindUser(ctx, data.Username)
-			if err != nil || len(users) == 0 {
+			if err != nil || len(users) != 1 {
 				log.Printf("[WARNING] Failed finding user %s: %s", data.Username, err)
 				resp.WriteHeader(400)
-				resp.Write([]byte(fmt.Sprintf(`{"success": false, "reason": "%s"}`, err)))
+				resp.Write([]byte(`{"success": false, "reason": "Failed finding user"}`))
 				return
 			}
 
 			newUser := users[0]
+			canAdd := len(newUser.Orgs) == 0
+			for _, orgId := range newUser.Orgs {
+				if org, err := shuffle.GetOrg(ctx, orgId); err == nil {
+					for _, orgUser := range org.Users {
+						if orgUser.Id == user.Id && orgUser.Role == "admin" {
+							canAdd = true
+							break
+						}
+					}
+				}
+
+				if canAdd {
+					break
+				}
+			}
+
+			if !canAdd {
+				log.Printf("[AUDIT] User %s (%s) tried to add existing user %s to org %s without being admin in any of their orgs", user.Username, user.Id, newUser.Username, currentOrg.Id)
+				resp.WriteHeader(403)
+				resp.Write([]byte(`{"success": false, "reason": "User already exists"}`))
+				return
+			}
+
 			if !shuffle.ArrayContains(newUser.Orgs, currentOrg.Id) {
 				newUser.Orgs = append(newUser.Orgs, currentOrg.Id)
 			}
@@ -5579,6 +5602,26 @@ func runInitEs(ctx context.Context) {
 		}
 	}
 
+	// Independent of a user's API key: recover stale runs across every organization.
+	recoveryInterval := 300
+	if configured, err := strconv.Atoi(os.Getenv("SHUFFLE_RERUN_SCHEDULE")); err == nil && configured >= recoveryInterval {
+		recoveryInterval = configured
+	}
+	_, err = newscheduler.Every(recoveryInterval).Seconds().Run(func() {
+		recoveryCtx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
+		defer cancel()
+		port := os.Getenv("BACKEND_PORT")
+		if port == "" {
+			port = "5001"
+		}
+		if err := recoverOnpremExecutions(recoveryCtx, "http://localhost:"+port); err != nil {
+			log.Printf("[ERROR] Persisted execution recovery failed: %s", err)
+		}
+	})
+	if err != nil {
+		log.Printf("[ERROR] Failed scheduling persisted execution recovery: %s", err)
+	}
+
 	// Getting apps to see if we should initialize a test
 	workflowapps, err := shuffle.GetAllWorkflowApps(ctx, 1000, 0)
 	log.Printf("[INFO] Getting and validating workflowapps. Got %d with err %#v", len(workflowapps), err)
@@ -6684,6 +6727,12 @@ func initHandlers() {
 	r.HandleFunc("/api/v1/recommendations/get_actions", shuffle.HandleActionRecommendation).Methods("POST", "OPTIONS")
 	r.HandleFunc("/api/v1/recommendations/modify", shuffle.HandleRecommendationAction).Methods("POST", "OPTIONS")
 	r.HandleFunc("/api/v1/workflows/{key}/revisions", shuffle.GetWorkflowRevisions).Methods("GET", "OPTIONS")
+	r.HandleFunc("/api/v1/workflows/{key}/revisions/summary", shuffle.HandleGetWorkflowRevisionsSummary).Methods("GET", "OPTIONS")
+	r.HandleFunc("/api/v1/workflows/{key}/runs", shuffle.HandleGetWorkflowRuns).Methods("GET", "OPTIONS")
+	r.HandleFunc("/api/v1/workflows/{key}/runs/{execution_id}", shuffle.HandleGetWorkflowRun).Methods("GET", "OPTIONS")
+	r.HandleFunc("/api/v1/workflows/{key}/compare", shuffle.HandleCompareWorkflow).Methods("POST", "OPTIONS")
+	r.HandleFunc("/api/v1/workflows/{key}/revert", shuffle.HandleRevertWorkflow).Methods("POST", "OPTIONS")
+	r.HandleFunc("/api/v1/workflows/{key}/issues", shuffle.HandleGetWorkflowIssues).Methods("GET", "OPTIONS")
 	r.HandleFunc("/api/v1/workflows/{key}/child_workflows", shuffle.GetChildWorkflows).Methods("GET", "OPTIONS")
 	r.HandleFunc("/api/v1/workflows/{key}/validation", shuffle.GetWorkflowValidation).Methods("GET", "OPTIONS")
 	r.HandleFunc("/api/v1/workflows/distribute/batch", shuffle.DistributeWorkflowsBatch).Methods("POST", "OPTIONS")
@@ -6869,6 +6918,7 @@ func initHandlers() {
 	r.HandleFunc("/api/v2/{datastore_category}/{datastore_key}", shuffle.HandleDatastorePostRedirect).Methods("POST", "OPTIONS")
 
 	r.Use(shuffle.RequestMiddleware)
+	shuffle.InternalRouter = r
 	http.Handle("/", r)
 }
 

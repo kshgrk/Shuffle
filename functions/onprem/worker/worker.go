@@ -6,6 +6,7 @@ import (
 
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -98,7 +99,7 @@ var startAction string
 //var results []shuffle.ActionResult
 //var allLogs map[string]string
 //var containerIds []string
-var downloadedImages []string
+var downloadedImages sync.Map
 
 type ImageDownloadBody struct {
 	Image string `json:"image"`
@@ -109,10 +110,11 @@ type ImageRequest struct {
 }
 
 var finishedExecutions []string
-var imagesDistributed []string
+var imagesDistributed sync.Map
 var imagedownloadTimeout = time.Second * 300
 
 var subflowPollBackoff sync.Map
+var executionSyncs sync.Map
 
 var window = shuffle.NewTimeWindow(10 * time.Second)
 
@@ -285,6 +287,7 @@ var autoDeploy = map[string]string{
 // New Worker mappings
 // visited, appendActions, nextActions, notFound, queueNodes, toRemove, executed, env
 var portMappings map[string]int
+var portMappingsMutex sync.RWMutex
 var baseport = 33333
 
 type UserInputSubflow struct {
@@ -294,7 +297,7 @@ type UserInputSubflow struct {
 }
 
 // Not using shuffle.SetWorkflowExecution as we only want to use cache in reality
-func setWorkflowExecution(ctx context.Context, workflowExecution shuffle.WorkflowExecution, dbSave bool) error {
+func setWorkflowExecution(ctx context.Context, workflowExecution shuffle.WorkflowExecution, dbSave bool, releaseUpdateLock ...func()) error {
 	if len(workflowExecution.ExecutionId) == 0 {
 		log.Printf("[DEBUG] Workflowexecution executionId can't be empty.")
 		return errors.New("ExecutionId can't be empty.")
@@ -325,6 +328,10 @@ func setWorkflowExecution(ctx context.Context, workflowExecution shuffle.Workflo
 		return err
 	}
 
+	// Persist under the update lock, but never hold it during callbacks or polling.
+	if len(releaseUpdateLock) > 0 {
+		releaseUpdateLock[0]()
+	}
 	handleExecutionResult(workflowExecution)
 	validated := shuffle.ValidateFinished(ctx, -1, workflowExecution)
 	if validated {
@@ -334,8 +341,7 @@ func setWorkflowExecution(ctx context.Context, workflowExecution shuffle.Workflo
 		}
 
 		log.Printf("[DEBUG][%s] Sending result (set). Status: %s, Actions: %d, Results: %d", workflowExecution.ExecutionId, workflowExecution.Status, len(workflowExecution.Workflow.Actions), len(workflowExecution.Results))
-		sendResult(workflowExecution, shutdownData)
-		return nil
+		return sendResult(workflowExecution, shutdownData)
 	}
 
 	// FIXME: Should this shutdown OR send the result?
@@ -353,7 +359,9 @@ func setWorkflowExecution(ctx context.Context, workflowExecution shuffle.Workflo
 				log.Printf("[ERROR] Failed marshalling shutdowndata during dbSave handler: %s", err)
 			}
 
-			sendResult(workflowExecution, shutdownData)
+			if err := sendResult(workflowExecution, shutdownData); err != nil {
+				return err
+			}
 
 			// Poll for 1 minute max if there is a "wait for results" subflow
 			subflowId := ""
@@ -474,7 +482,10 @@ func shutdown(workflowExecution shuffle.WorkflowExecution, nodeId string, reason
 	if handleResultSend && requestsSent < 2 {
 		shutdownData, err := json.Marshal(workflowExecution)
 		if err == nil {
-			sendResult(workflowExecution, shutdownData)
+			if err := sendResult(workflowExecution, shutdownData); err != nil {
+				log.Printf("[WARNING][%s] Keeping worker context because its final update was not accepted", workflowExecution.ExecutionId)
+				return
+			}
 			//log.Printf("[WARNING][%s] Sent shutdown update with %d results and result value %s", workflowExecution.ExecutionId, len(workflowExecution.Results), reason)
 		} else {
 			log.Printf("[WARNING][%s] Failed to send update: %s", workflowExecution.ExecutionId, err)
@@ -576,7 +587,7 @@ func shutdown(workflowExecution shuffle.WorkflowExecution, nodeId string, reason
 }
 
 // ** STARTREMOVE ***/
-func deployk8sApp(image string, identifier string, env []string) error {
+func deployk8sApp(image string, identifier string, env []string, authorization, orgID string) error {
 	if len(os.Getenv("KUBERNETES_NAMESPACE")) > 0 {
 		kubernetesNamespace = os.Getenv("KUBERNETES_NAMESPACE")
 	} else {
@@ -764,17 +775,32 @@ func deployk8sApp(image string, identifier string, env []string) error {
 		return nil
 	}
 
-	if cloudHybridPrivateRegistry {
+	if cloudHybridPrivateRegistry && !strings.Contains(image, "@sha256:") {
 		if os.Getenv("SHUFFLE_AUTO_IMAGE_DOWNLOAD") == "false" {
 			return fmt.Errorf("image %s is not deployed and SHUFFLE_AUTO_IMAGE_DOWNLOAD is false", image)
 		}
 
-		log.Printf("[INFO] Hybrid app image %s is not deployed. Downloading %s from the cloud backend and pushing it as %s", name, sourceImage, image)
-		if downloadErr := shuffle.DownloadDockerImageBackend(&http.Client{Timeout: imagedownloadTimeout}, sourceImage); downloadErr != nil {
-			return fmt.Errorf("download and push app image %s: %w", sourceImage, downloadErr)
+		if imageManagerEnabled() {
+			log.Printf("[INFO] Ensuring hybrid app image %s is available as %s", sourceImage, image)
+			executionID := ""
+			for _, value := range env {
+				if strings.HasPrefix(value, "EXECUTIONID=") {
+					executionID = strings.TrimPrefix(value, "EXECUTIONID=")
+					break
+				}
+			}
+			// Execution authorization must not select Cloud's Org-Id/environment-auth path.
+			if ensureErr := ensureImage(ctx, sourceImage, authorization, "", executionID, false); ensureErr != nil {
+				return fmt.Errorf("ensure app image %s: %w", sourceImage, ensureErr)
+			}
+		} else {
+			log.Printf("[INFO] Hybrid app image %s is not deployed. Downloading %s from the cloud backend and pushing it as %s", name, sourceImage, image)
+			if downloadErr := shuffle.DownloadDockerImageBackend(&http.Client{Timeout: imagedownloadTimeout}, sourceImage); downloadErr != nil {
+				return fmt.Errorf("download and push app image %s: %w", sourceImage, downloadErr)
+			}
 		}
 		if err == nil {
-			log.Printf("[INFO] Pushed image %s for existing deployment %s", image, name)
+			log.Printf("[INFO] Image %s is ready for existing deployment %s", image, name)
 			return nil
 		}
 	}
@@ -844,9 +870,12 @@ func deployk8sApp(image string, identifier string, env []string) error {
 	}
 
 	deployment.Spec.Template.Spec.Containers[0].ImagePullPolicy = corev1.PullIfNotPresent
+	if cloudHybridPrivateRegistry {
+		deployment.Spec.Template.Spec.Containers[0].ImagePullPolicy = corev1.PullAlways
+	}
 
 	_, err = clientset.AppsV1().Deployments(kubernetesNamespace).Create(context.Background(), deployment, metav1.CreateOptions{})
-	if err != nil {
+	if err != nil && !k8serrors.IsAlreadyExists(err) {
 		log.Printf("[ERROR] Failed creating deployment: %v", err)
 		return err
 	}
@@ -872,7 +901,7 @@ func deployk8sApp(image string, identifier string, env []string) error {
 	}
 
 	_, err = clientset.CoreV1().Services(kubernetesNamespace).Create(context.TODO(), service, metav1.CreateOptions{})
-	if err != nil {
+	if err != nil && !k8serrors.IsAlreadyExists(err) {
 		log.Printf("[ERROR] Failed creating service: %v", err)
 		return err
 	}
@@ -1033,15 +1062,16 @@ func deployApp(cli *dockerclient.Client, image string, identifier string, env []
 		appName = strings.ToLower(appName)
 		//log.Printf("[INFO][%s] New appname: %s, image: %s", workflowExecution.ExecutionId, appName, image)
 
-		if os.Getenv("SHUFFLE_AUTO_IMAGE_DOWNLOAD") != "false" && !shuffle.ArrayContains(downloadedImages, image) && isKubernetes != "true" {
+		_, downloaded := downloadedImages.Load(image)
+		if os.Getenv("SHUFFLE_AUTO_IMAGE_DOWNLOAD") != "false" && !downloaded && isKubernetes != "true" {
 			if swarmServiceAvailable(appName) {
 				log.Printf("[DEBUG] App service %s is already deployed. Skipping worker image download for %s", appName, image)
-				downloadedImages = append(downloadedImages, image)
+				downloadedImages.Store(image, true)
 			} else {
 				log.Printf("[DEBUG] Downloading image %s from backend as it's first iteration for this image on the worker. Timeout: 60", image)
 				err := shuffle.DownloadDockerImageBackend(&http.Client{Timeout: imagedownloadTimeout}, image)
 				if err == nil {
-					downloadedImages = append(downloadedImages, image)
+					downloadedImages.Store(image, true)
 				}
 			}
 		}
@@ -1058,12 +1088,21 @@ func deployApp(cli *dockerclient.Client, image string, identifier string, env []
 		} else {
 			// ** STARTREMOVE ***/
 			exposedPort = 80
+			if imageManagerEnabled() && os.Getenv("SHUFFLE_AUTO_IMAGE_DOWNLOAD") != "false" {
+				image, err = resolveWeeklyKubernetesImage(context.Background(), image, workflowExecution.Authorization, "", workflowExecution.ExecutionId, false)
+				if err != nil {
+					return fmt.Errorf("resolve weekly app image: %w", err)
+				}
+				// New actions use a versioned service; in-flight actions retain their old service.
+				version := fmt.Sprintf("%x", sha256.Sum256([]byte(appName+image)))[:16]
+				appName = strings.TrimRight(appName[:min(len(appName), 46)], "-.") + "-" + version
+			}
 			//deployport, err := strconv.Atoi(os.Getenv("SHUFFLE_APP_EXPOSED_PORT"))
 			//if err == nil {
 			//	exposedPort = deployport
 			//}
 
-			err = findAppInfoKubernetes(image, appName, env)
+			err = findAppInfoKubernetes(image, appName, env, workflowExecution.Authorization, workflowExecution.ExecutionOrg)
 			if err != nil {
 				log.Printf("[ERROR] Failed finding and creating port for %s: %s", appName, err)
 				return err
@@ -1526,8 +1565,10 @@ func getWorkerURLs() ([]string, error) {
 	serviceName := "shuffle-workers"
 
 	// Get the list of tasks for the service
-	tasks, err := cli.TaskList(context.Background(), types.TaskListOptions{
-		Filters: filters.NewArgs(filters.Arg("service", serviceName)),
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	tasks, err := cli.TaskList(ctx, types.TaskListOptions{
+		Filters: filters.NewArgs(filters.Arg("service", serviceName), filters.Arg("desired-state", "running")),
 	})
 
 	if err != nil {
@@ -1537,6 +1578,9 @@ func getWorkerURLs() ([]string, error) {
 
 	// Print task information
 	for _, task := range tasks {
+		if task.DesiredState != swarm.TaskStateRunning || task.Status.State != swarm.TaskStateRunning {
+			continue
+		}
 		url := fmt.Sprintf("http://%s.%d.%s:33333", serviceName, task.Slot, task.ID)
 		workerUrls = append(workerUrls, url)
 	}
@@ -1556,9 +1600,15 @@ func askOtherWorkersToDownloadImage(image string) {
 		return
 	}
 
-	if shuffle.ArrayContains(imagesDistributed, image) {
+	if _, claimed := imagesDistributed.LoadOrStore(image, true); claimed {
 		return
 	}
+	distributed := false
+	defer func() {
+		if !distributed {
+			imagesDistributed.Delete(image)
+		}
+	}()
 
 	urls, err := getWorkerURLs()
 	if err != nil {
@@ -1570,8 +1620,7 @@ func askOtherWorkersToDownloadImage(image string) {
 		return
 	}
 
-	httpClient := &http.Client{}
-	distributed := false
+	httpClient := &http.Client{Timeout: imagedownloadTimeout}
 	for _, url := range urls {
 		//log.Printf("[DEBUG] Trying to speak to: %s", url)
 		imagesRequest := ImageRequest{
@@ -1599,19 +1648,17 @@ func askOtherWorkersToDownloadImage(image string) {
 			continue
 		}
 
-		defer resp.Body.Close()
 		respBody, err := ioutil.ReadAll(resp.Body)
+		resp.Body.Close()
 		if err != nil {
 			log.Printf("[ERROR] Error in reading response body : %s", err)
 			continue
 		}
 
 		log.Printf("[INFO] Response body when tried sending images for nodes to download: %s", respBody)
-		distributed = true
-	}
-
-	if distributed {
-		imagesDistributed = append(imagesDistributed, image)
+		if resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
+			distributed = true
+		}
 	}
 }
 
@@ -1708,7 +1755,8 @@ func handleExecutionResult(workflowExecution shuffle.WorkflowExecution) {
 			}
 		}
 
-		askOtherWorkersToDownloadImage(imageName)
+		// Peer image warming must not block local execution dispatch.
+		go askOtherWorkersToDownloadImage(imageName)
 
 		// Added UUID to identifier just in case
 		//identifier := fmt.Sprintf("%s_%s_%s_%s_%s", appname, appversion, action.ID, workflowExecution.ExecutionId, uuid.NewV4())
@@ -1896,7 +1944,7 @@ func handleExecutionResult(workflowExecution shuffle.WorkflowExecution) {
 					err := shuffle.DownloadDockerImageBackend(&http.Client{Timeout: imagedownloadTimeout}, imageName)
 					if err == nil {
 						log.Printf("[DEBUG] Downloaded image %s from backend (CLEANUP)", imageName)
-						downloadedImages = append(downloadedImages, imageName)
+						downloadedImages.Store(imageName, true)
 						//err = deployApp(dockercli, image, identifier, env, workflow, action)
 						err = deployApp(dockercli, imageName, identifier, env, workflowExecution, action)
 						if err != nil && !strings.Contains(err.Error(), "Conflict. The container name") {
@@ -2022,7 +2070,7 @@ func handleExecutionResult(workflowExecution shuffle.WorkflowExecution) {
 						err := shuffle.DownloadDockerImageBackend(&http.Client{Timeout: imagedownloadTimeout}, imageName)
 						if err == nil {
 							log.Printf("[DEBUG] Downloaded image %s from backend (CLEANUP)", imageName)
-							downloadedImages = append(downloadedImages, imageName)
+							downloadedImages.Store(imageName, true)
 							//err = deployApp(dockercli, image, identifier, env, workflow, action)
 							err = deployApp(dockercli, imageName, identifier, env, workflowExecution, action)
 							if err != nil && !strings.Contains(err.Error(), "Conflict. The container name") {
@@ -2358,7 +2406,7 @@ func handleSubflowPoller(ctx context.Context, workflowExecution shuffle.Workflow
 		cachedBytes, ok := cacheData.([]uint8)
 		if ok {
 			cacheWorkflow := shuffle.WorkflowExecution{}
-			if jsonErr := json.Unmarshal([]byte(cachedBytes), &cacheWorkflow); jsonErr == nil {
+			if jsonErr := json.Unmarshal([]byte(cachedBytes), &cacheWorkflow); jsonErr == nil && cacheWorkflow.ExecutionId == workflowExecution.ExecutionId && cacheWorkflow.Authorization == workflowExecution.Authorization {
 				workflowExecution = cacheWorkflow
 				log.Printf("[DEBUG][%s] Using cached workflow execution for subflow poll", workflowExecution.ExecutionId)
 
@@ -2394,16 +2442,20 @@ func handleSubflowPoller(ctx context.Context, workflowExecution shuffle.Workflow
 		}
 	}
 
-	if len(data) == 0 {
-		log.Printf("[WARNING] Stream result missing execution ID and authorization; injecting them from workflow execution")
-		data = fmt.Sprintf(`{"execution_id": "%s", "authorization": "%s"}`, workflowExecution.ExecutionId, workflowExecution.Authorization)
+	pollData, err := json.Marshal(shuffle.ActionResult{ExecutionId: workflowExecution.ExecutionId, Authorization: workflowExecution.Authorization})
+	if err != nil {
+		return err
 	}
 
 	req, err := http.NewRequest(
 		"POST",
 		streamResultUrl,
-		bytes.NewBuffer([]byte(data)),
+		bytes.NewReader(pollData),
 	)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
 
 	client := shuffle.GetExternalClient(streamResultUrl)
 	newresp, err := client.Do(req)
@@ -2433,12 +2485,18 @@ func handleSubflowPoller(ctx context.Context, workflowExecution shuffle.Workflow
 		return errors.New(fmt.Sprintf("Bad statuscode: %d", newresp.StatusCode))
 	}
 
-	err = json.Unmarshal(body, &workflowExecution)
+	var polledExecution shuffle.WorkflowExecution
+	err = json.Unmarshal(body, &polledExecution)
 	if err != nil {
 		log.Printf("[ERROR] Failed workflowExecution unmarshal: %s", err)
 		time.Sleep(nextSubflowPollDelay(key))
 		return err
 	}
+	if polledExecution.ExecutionId != workflowExecution.ExecutionId || polledExecution.Authorization != workflowExecution.Authorization {
+		time.Sleep(nextSubflowPollDelay(key))
+		return errors.New("subflow poll returned a different execution or authorization")
+	}
+	workflowExecution = polledExecution
 
 	if workflowExecution.Status == "FINISHED" || workflowExecution.Status == "SUCCESS" {
 		log.Printf("[INFO][%s] Workflow execution is finished. Exiting worker.", workflowExecution.ExecutionId)
@@ -2544,11 +2602,18 @@ func handleDefaultExecutionWrapper(ctx context.Context, workflowExecution shuffl
 		}
 	}
 
+	pollData, err := json.Marshal(shuffle.ActionResult{ExecutionId: workflowExecution.ExecutionId, Authorization: workflowExecution.Authorization})
+	if err != nil {
+		return err
+	}
 	req, err := http.NewRequest(
 		"POST",
 		streamResultUrl,
-		bytes.NewBuffer([]byte(data)),
+		bytes.NewReader(pollData),
 	)
+	if err != nil {
+		return err
+	}
 
 	newresp, err := topClient.Do(req)
 	if err != nil {
@@ -2577,12 +2642,17 @@ func handleDefaultExecutionWrapper(ctx context.Context, workflowExecution shuffl
 		return errors.New(fmt.Sprintf("Bad statuscode: %d", newresp.StatusCode))
 	}
 
-	err = json.Unmarshal(body, &workflowExecution)
+	var polledExecution shuffle.WorkflowExecution
+	err = json.Unmarshal(body, &polledExecution)
 	if err != nil {
 		log.Printf("[ERROR] Failed workflowExecution unmarshal: %s", err)
 		time.Sleep(time.Duration(sleepTime) * time.Second)
 		return err
 	}
+	if polledExecution.ExecutionId != workflowExecution.ExecutionId || polledExecution.Authorization != workflowExecution.Authorization {
+		return errors.New("execution poll returned a different execution or authorization")
+	}
+	workflowExecution = polledExecution
 
 	if workflowExecution.Status == "FINISHED" || workflowExecution.Status == "SUCCESS" {
 		log.Printf("[INFO][%s] Workflow execution is finished. Exiting worker.", workflowExecution.ExecutionId)
@@ -3117,6 +3187,23 @@ func handleWorkflowQueue(resp http.ResponseWriter, request *http.Request) {
 	}
 
 	log.Printf("[DEBUG][%s] Action: Received, Label: '%s', Action: '%s', Status: %s, Run status: %s, Extra=Retry:%d", workflowExecution.ExecutionId, actionResult.Action.Label, actionResult.Action.AppName, actionResult.Status, workflowExecution.Status, retries)
+	// Keep ordinary completed app results even if the update lock is busy.
+	// Control-flow apps still need ParsedExecutionResult to decide their status.
+	if isTerminalResultStatus(actionResult.Status) && actionResult.Action.AppName != "shuffle-subflow" && actionResult.Action.AppName != "shuffle-subflow-v2" && actionResult.Action.AppName != "Shuffle Workflow" && actionResult.Action.AppName != "User Input" && actionResult.Action.AppName != "shuffle-ai" && actionResult.Action.AppName != "AI Agent" && actionResult.Action.AppName != "Shuffle Agent" {
+		key := fmt.Sprintf("%s_%s_result", actionResult.ExecutionId, actionResult.Action.ID)
+		if _, err := shuffle.GetCache(ctx, key); err != nil {
+			data, err := json.Marshal(shuffle.FixActionResultOutput(actionResult))
+			if err == nil {
+				err = shuffle.SetCache(ctx, key, data, 35)
+			}
+			if err != nil {
+				log.Printf("[WARNING][%s] Failed retaining completed app result: %s", actionResult.ExecutionId, err)
+				resp.WriteHeader(http.StatusServiceUnavailable)
+				resp.Write([]byte(`{"success":false,"reason":"Failed retaining app result"}`))
+				return
+			}
+		}
+	}
 
 	// results = append(results, actionResult)
 	// log.Printf("[INFO][%s] Time to execute %s (%s) with app %s:%s, function %s, env %s with %d parameters.", workflowExecution.ExecutionId, action.ID, action.Label, action.AppName, action.AppVersion, action.Name, action.Environment, len(action.Parameters))
@@ -3127,6 +3214,42 @@ func handleWorkflowQueue(resp http.ResponseWriter, request *http.Request) {
 // Will make sure transactions are always ran for an execution. This is recursive if it fails. Allowed to fail up to 5 times
 func runWorkflowExecutionTransaction(ctx context.Context, attempts int64, workflowExecutionId string, actionResult shuffle.ActionResult, resp http.ResponseWriter) {
 	//log.Printf("[DEBUG][%s] IN WORKFLOWEXECUTION SUB!", actionResult.ExecutionId)
+	claimKey := ""
+	releaseClaim := func() {
+		if claimKey == "" {
+			return
+		}
+
+		if err := shuffle.DeleteCache(ctx, claimKey); err != nil {
+			log.Printf("[WARNING][%s] Failed releasing execution update lock: %s", workflowExecutionId, err)
+		}
+		claimKey = ""
+	}
+	defer releaseClaim()
+
+	if len(os.Getenv("SHUFFLE_MEMCACHED")) > 0 {
+		newClaimKey := fmt.Sprintf("workflowexecution_%s_update", workflowExecutionId)
+		claimed := false
+		var claimErr error
+		for attempt := 0; attempt < 300; attempt++ {
+			claimed, claimErr = shuffle.ClaimCacheKey(newClaimKey, 120)
+			if claimErr != nil || claimed {
+				break
+			}
+
+			time.Sleep(100 * time.Millisecond)
+		}
+
+		if claimErr != nil || !claimed {
+			log.Printf("[WARNING][%s] Failed claiming execution update lock: %v", workflowExecutionId, claimErr)
+			resp.WriteHeader(http.StatusServiceUnavailable)
+			resp.Write([]byte(`{"success": false, "reason": "Execution update is busy. Retry the result."}`))
+			return
+		}
+
+		claimKey = newClaimKey
+	}
+
 	workflowExecution, err := shuffle.GetWorkflowExecution(ctx, workflowExecutionId)
 	if err != nil {
 		log.Printf("[WARNING][%s] Failed to find execution in cache requesting backend (2): %s", actionResult.ExecutionId, err)
@@ -3139,7 +3262,6 @@ func runWorkflowExecutionTransaction(ctx context.Context, attempts int64, workfl
 		}
 	}
 
-	resultLength := len(workflowExecution.Results)
 	setExecution := true
 
 	workflowExecution, dbSave, err := shuffle.ParsedExecutionResult(ctx, *workflowExecution, actionResult, true, 0)
@@ -3159,6 +3281,7 @@ func runWorkflowExecutionTransaction(ctx context.Context, attempts int64, workfl
 				log.Printf("[ERROR][%s] Failed marshalling execution (35): %s", workflowExecution.ExecutionId, err)
 			}
 
+			releaseClaim()
 			sendResult(*workflowExecution, shutdownData)
 			shutdown(*workflowExecution, "", "", false)
 			return
@@ -3169,6 +3292,7 @@ func runWorkflowExecutionTransaction(ctx context.Context, attempts int64, workfl
 		if isAgentNode && actionResult.Status != "FAILURE" && actionResult.Status != "ABORTED" && actionResult.Status != "SKIPPED" {
 			log.Printf("[INFO][%s] AI Agent dispatched to Cloud. Stopping worker execution cleanly to wait for Cloud completion.", workflowExecution.ExecutionId)
 
+			releaseClaim()
 			shutdown(*workflowExecution, "", "", false)
 			return
 		}
@@ -3181,6 +3305,7 @@ func runWorkflowExecutionTransaction(ctx context.Context, attempts int64, workfl
 			if err != nil {
 				log.Printf("[ERROR][%s] Failed marshalling execution (36) - not sending backend WAITING: %s", workflowExecution.ExecutionId, err)
 			} else {
+				releaseClaim()
 				sendResult(*workflowExecution, shutdownData)
 				shutdown(*workflowExecution, "", "", false)
 			}
@@ -3206,7 +3331,6 @@ func runWorkflowExecutionTransaction(ctx context.Context, attempts int64, workfl
 				}
 			}
 
-			resultLength = len(workflowExecution.Results)
 			setExecution = true
 
 			workflowExecution, dbSave, err = shuffle.ParsedExecutionResult(ctx, *workflowExecution, actionResult, false, 0)
@@ -3233,44 +3357,13 @@ func runWorkflowExecutionTransaction(ctx context.Context, attempts int64, workfl
 	//	log.Printf("[DEBUG][%s] There may have been an issue in transaction queue. Result lengths: %d vs %d. Should check which exists the base results, but not in entire execution, then append.", workflowExecution.ExecutionId, len(results), len(workflowExecution.Results))
 	//}
 
-	// Validating that action results hasn't changed
-	// Handled using cachhing, so actually pretty fast
-	cacheKey := fmt.Sprintf("workflowexecution_%s", workflowExecution.ExecutionId)
-	cache, err := shuffle.GetCache(ctx, cacheKey)
-	if err == nil {
-		//parsedValue := value.(*shuffle.WorkflowExecution)
-
-		parsedValue := &shuffle.WorkflowExecution{}
-		cacheData := []byte(cache.([]uint8))
-		err = json.Unmarshal(cacheData, &workflowExecution)
-		if err != nil {
-			log.Printf("[ERROR][%s] Failed unmarshalling workflowexecution: %s", workflowExecution.ExecutionId, err)
-		}
-
-		if len(parsedValue.Results) > 0 && len(parsedValue.Results) != resultLength {
-			setExecution = false
-			if attempts > 5 {
-			}
-
-			attempts += 1
-			log.Printf("[DEBUG][%s] Rerunning transaction as results has changed. %d vs %d", workflowExecution.ExecutionId, len(parsedValue.Results), resultLength)
-			/*
-				if len(workflowExecution.Results) <= len(workflowExecution.Workflow.Actions) {
-					log.Printf("[DEBUG][%s] Rerunning transaction as results has changed. %d vs %d", workflowExecution.ExecutionId, len(workflowExecution.Results), len(workflowExecution.Workflow.Actions))
-					runWorkflowExecutionTransaction(ctx, attempts, workflowExecutionId, actionResult, resp)
-					return
-				}
-			*/
-		}
-	}
-
 	if setExecution || workflowExecution.Status == "FINISHED" || workflowExecution.Status == "ABORTED" || workflowExecution.Status == "FAILURE" {
 		if debug {
 			log.Printf("[DEBUG][%s] Running setexec with status %s and %d/%d results", workflowExecution.ExecutionId, workflowExecution.Status, len(workflowExecution.Results), len(workflowExecution.Workflow.Actions))
 		}
 
 		//result(s)", workflowExecution.ExecutionId, workflowExecution.Status, len(workflowExecution.Results))
-		err = setWorkflowExecution(ctx, *workflowExecution, dbSave)
+		err = setWorkflowExecution(ctx, *workflowExecution, dbSave, releaseClaim)
 		if err != nil {
 			log.Printf("[ERROR][%s] Failed setting execution: %s", workflowExecution.ExecutionId, err)
 
@@ -3278,6 +3371,7 @@ func runWorkflowExecutionTransaction(ctx context.Context, attempts int64, workfl
 			resp.Write([]byte(fmt.Sprintf(`{"success": false, "reason": "Failed setting workflowexecution actionresult: %s"}`, err)))
 			return
 		}
+		releaseClaim()
 
 		/*** STARTREMOVE ***/
 		if os.Getenv("SHUFFLE_SWARM_CONFIG") == "run" || os.Getenv("SHUFFLE_SWARM_CONFIG") == "swarm" {
@@ -3300,6 +3394,7 @@ func runWorkflowExecutionTransaction(ctx context.Context, attempts int64, workfl
 		/*** ENDREMOVE ***/
 	} else {
 		log.Printf("[INFO][%s] Skipping setexec with status %s", workflowExecution.ExecutionId, workflowExecution.Status)
+		releaseClaim()
 
 		// Just in case. Should MAYBE validate finishing another time as well.
 		// This fixes issues with e.g. shuffle.Action -> shuffle.Trigger -> shuffle.Action.
@@ -3373,7 +3468,7 @@ func sendSelfRequest(actionResult shuffle.ActionResult) {
 	}
 }
 
-func sendResult(workflowExecution shuffle.WorkflowExecution, data []byte) {
+func sendResult(workflowExecution shuffle.WorkflowExecution, data []byte) error {
 	if workflowExecution.ExecutionSource == "default" && os.Getenv("SHUFFLE_SWARM_CONFIG") != "run" && os.Getenv("SHUFFLE_SWARM_CONFIG") != "swarm" {
 		//log.Printf("[INFO][%s] Not sending backend info since source is default (not swarm)", workflowExecution.ExecutionId)
 		//return
@@ -3399,38 +3494,45 @@ func sendResult(workflowExecution shuffle.WorkflowExecution, data []byte) {
 	*/
 
 	streamUrl := fmt.Sprintf("%s/api/v1/streams", baseUrl)
-	req, err := http.NewRequest(
-		"POST",
-		streamUrl,
-		bytes.NewBuffer([]byte(data)),
-	)
-
-	if err != nil {
-		log.Printf("[ERROR][%s] Failed creating finishing request: %s", workflowExecution.ExecutionId, err)
-		log.Printf("[DEBUG][%s] Shutting down (22)", workflowExecution.ExecutionId)
-		shutdown(workflowExecution, "", "", false)
-		return
-	}
-
 	client := shuffle.GetExternalClient(streamUrl)
-	newresp, err := client.Do(req)
-	if err != nil {
-		log.Printf("[ERROR][%s] Error running finishing request (1): %s", workflowExecution.ExecutionId, err)
-		log.Printf("[DEBUG][%s] Shutting down (23)", workflowExecution.ExecutionId)
-		shutdown(workflowExecution, "", "", false)
-		return
-	}
-
-	defer newresp.Body.Close()
-	if newresp.Body != nil {
-		body, err := ioutil.ReadAll(newresp.Body)
-		//log.Printf("[INFO] BACKEND STATUS: %d", newresp.StatusCode)
+	client.Timeout = 45 * time.Second
+	var lastErr error
+	for attempt := 0; attempt < 5; attempt++ {
+		req, err := http.NewRequest("POST", streamUrl, bytes.NewReader(data))
 		if err != nil {
-			log.Printf("[ERROR][%s] Failed reading body: %s", workflowExecution.ExecutionId, err)
+			return fmt.Errorf("failed creating execution update request: %w", err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		newresp, err := client.Do(req)
+		if err != nil {
+			lastErr = err
 		} else {
-			log.Printf("[DEBUG][%s] Sent request to backend: %s", workflowExecution.ExecutionId, string(body))
+			body, readErr := io.ReadAll(io.LimitReader(newresp.Body, 65536))
+			newresp.Body.Close()
+			if newresp.StatusCode == http.StatusOK && readErr == nil {
+				var acknowledgement struct {
+					Success *bool `json:"success"`
+				}
+				if json.Unmarshal(body, &acknowledgement) == nil && acknowledgement.Success != nil && *acknowledgement.Success {
+					log.Printf("[DEBUG][%s] Backend accepted execution update", workflowExecution.ExecutionId)
+					return nil
+				}
+			}
+			lastErr = fmt.Errorf("backend execution update returned HTTP %d", newresp.StatusCode)
+			if readErr != nil {
+				lastErr = fmt.Errorf("failed reading execution update response: %w", readErr)
+			}
+			if newresp.StatusCode >= 400 && newresp.StatusCode < 500 && newresp.StatusCode != http.StatusTooManyRequests {
+				log.Printf("[ERROR][%s] %s", workflowExecution.ExecutionId, lastErr)
+				return lastErr
+			}
+		}
+		if attempt < 4 {
+			time.Sleep(time.Duration(1<<attempt) * 100 * time.Millisecond)
 		}
 	}
+	log.Printf("[ERROR][%s] Execution update was not accepted after retries: %s", workflowExecution.ExecutionId, lastErr)
+	return lastErr
 }
 
 func validateFinished(workflowExecution shuffle.WorkflowExecution) bool {
@@ -3484,8 +3586,10 @@ func validateFinished(workflowExecution shuffle.WorkflowExecution) bool {
 			}
 		}
 
+		if err := sendResult(workflowExecution, shutdownData); err != nil {
+			return false
+		}
 		shuffle.RunCacheCleanup(ctx, workflowExecution)
-		sendResult(workflowExecution, shutdownData)
 		return true
 	}
 
@@ -4066,20 +4170,18 @@ func findAppInfo(image, name string, redeploy bool) (int, error) {
 	exposedPort := -1
 
 	// Exists as a "cache" layer
-	if portMappings != nil {
-		for key, value := range portMappings {
-			if value > highest {
-				highest = value
-			}
-
-			if key == name {
-				exposedPort = value
-				break
-			}
+	portMappingsMutex.RLock()
+	for key, value := range portMappings {
+		if value > highest {
+			highest = value
 		}
-	} else {
-		portMappings = make(map[string]int)
+
+		if key == name {
+			exposedPort = value
+			break
+		}
 	}
+	portMappingsMutex.RUnlock()
 
 	//Filters:
 	if exposedPort == -1 || redeploy {
@@ -4128,8 +4230,12 @@ func findAppInfo(image, name string, redeploy bool) (int, error) {
 					continue
 				}
 
-				// This seems to have concurrency issues
+				portMappingsMutex.Lock()
+				if portMappings == nil {
+					portMappings = make(map[string]int)
+				}
 				portMappings[service.Spec.Annotations.Name] = int(endpoint.PublishedPort)
+				portMappingsMutex.Unlock()
 				if int(endpoint.PublishedPort) > highest {
 					highest = int(endpoint.PublishedPort)
 				}
@@ -4274,7 +4380,7 @@ func hasAvailableSwarmService(services []swarm.Service, name string) bool {
 // Runs data discovery
 /*** STARTREMOVE ***/
 
-func findAppInfoKubernetes(image, name string, env []string) error {
+func findAppInfoKubernetes(image, name string, env []string, authorization, orgID string) error {
 	clientset, _, err := shuffle.GetKubernetesClient()
 	if err != nil {
 		log.Printf("[ERROR] Failed getting kubernetes: %s", err)
@@ -4317,7 +4423,7 @@ func findAppInfoKubernetes(image, name string, env []string) error {
 		}
 	}
 
-	err = deployk8sApp(image, name, env)
+	err = deployk8sApp(image, name, env, authorization, orgID)
 	return err
 }
 
@@ -4542,18 +4648,24 @@ func sendAppRequest(ctx context.Context, incomingUrl, appName string, port int, 
 	time.Sleep(time.Duration(randMs) * time.Millisecond)
 
 	newExecId := fmt.Sprintf("%s_%s", workflowExecution.ExecutionId, action.ID)
-	_, err = shuffle.GetCache(ctx, newExecId)
-	if err == nil {
-		log.Printf("[DEBUG] Result for %s already found (PRE REQUEST) - returning", newExecId)
-		return nil
-	}
-
-	cacheData := []byte("1")
-	err = shuffle.SetCache(ctx, newExecId, cacheData, 30)
-	if err != nil {
-		log.Printf("[WARNING] Failed setting cache for action %s: %s", newExecId, err)
+	if os.Getenv("SHUFFLE_MEMCACHED") != "" {
+		claimed, claimErr := shuffle.ClaimCacheKey(newExecId, 30*60)
+		if claimErr != nil {
+			return fmt.Errorf("claim app dispatch %s: %w", newExecId, claimErr)
+		}
+		if !claimed {
+			log.Printf("[DEBUG] App dispatch for %s is already claimed - returning", newExecId)
+			return nil
+		}
 	} else {
-		//log.Printf("[DEBUG][%s] Adding %s to cache (%#v)", workflowExecution.ExecutionId, newExecId, action.Name)
+		_, err = shuffle.GetCache(ctx, newExecId)
+		if err == nil {
+			log.Printf("[DEBUG] Result for %s already found (PRE REQUEST) - returning", newExecId)
+			return nil
+		}
+		if err = shuffle.SetCache(ctx, newExecId, []byte("1"), 30); err != nil {
+			log.Printf("[WARNING] Failed setting cache for action %s: %s", newExecId, err)
+		}
 	}
 
 	client := shuffle.GetExternalClient(streamUrl)
@@ -4578,20 +4690,57 @@ func sendAppRequest(ctx context.Context, incomingUrl, appName string, port int, 
 	// Content type required
 	req.Header.Set("Content-Type", "application/json")
 
+	connectDeadline := time.Now().Add(30 * time.Second)
 	newresp, err := client.Do(req)
+	var connectionErr *net.OpError
+	// Keep the marker while DNS and a newly deployed listener become ready; no request reached the app yet.
+	for err != nil && time.Now().Before(connectDeadline) && errors.As(err, &connectionErr) && connectionErr.Op == "dial" {
+		time.Sleep(time.Second)
+		req.Body, err = req.GetBody()
+		if err != nil {
+			return err
+		}
+		newresp, err = client.Do(req)
+	}
+	notConnected := err != nil && errors.As(err, &connectionErr) && connectionErr.Op == "dial"
+	if err == nil {
+		defer newresp.Body.Close()
+		if newresp.StatusCode < http.StatusOK || newresp.StatusCode >= http.StatusMultipleChoices {
+			err = fmt.Errorf("app rejected execution request with HTTP %d", newresp.StatusCode)
+		} else {
+			body, readErr := ioutil.ReadAll(newresp.Body)
+			if readErr != nil {
+				return readErr
+			}
+			// Older SDKs return text; only an explicit negative JSON acknowledgement is rejected.
+			var acknowledgement struct {
+				Success *bool `json:"success"`
+			}
+			if json.Unmarshal(body, &acknowledgement) == nil && acknowledgement.Success != nil && !*acknowledgement.Success {
+				err = errors.New("app rejected execution request (success=false)")
+			}
+			if debug {
+				log.Printf("[DEBUG][%s] NEWRESP (from app): %s", workflowExecution.ExecutionId, string(body))
+			}
+		}
+	}
 	if err != nil {
 		// Another timeout issue here somewhere
 		// context deadline
-		if strings.Contains(fmt.Sprintf("%s", err), "context deadline exceeded") || strings.Contains(fmt.Sprintf("%s", err), "Client.Timeout exceeded") {
+		if !notConnected && (strings.Contains(fmt.Sprintf("%s", err), "context deadline exceeded") || strings.Contains(fmt.Sprintf("%s", err), "Client.Timeout exceeded")) {
 			return nil
 		}
 
-		if strings.Contains(fmt.Sprintf("%s", err), "timeout awaiting response") {
+		if !notConnected && strings.Contains(fmt.Sprintf("%s", err), "timeout awaiting response") {
 			return nil
 		}
 
 		newerr := fmt.Sprintf("%s", err)
-		if strings.Contains(newerr, "connection refused") || strings.Contains(newerr, "no such host") {
+		if notConnected {
+			// No connection was made; the dispatch marker must not suppress the retry.
+			if cacheErr := shuffle.DeleteCache(ctx, newExecId); cacheErr != nil {
+				return fmt.Errorf("release undelivered app request %s: %w", newExecId, cacheErr)
+			}
 			newerr = fmt.Sprintf("Failed connecting to app %s. Is the Docker image available?", appName)
 		} else {
 			// escape quotes and newlines
@@ -4611,7 +4760,7 @@ func sendAppRequest(ctx context.Context, incomingUrl, appName string, port int, 
 
 		// Try redeployment
 		attempts += 1
-		if attempts < 2 {
+		if attempts < 2 && newresp == nil {
 			// Check the service and fix it.
 			if isKubernetes == "true" {
 				log.Printf("[WARNING] App Redeployment in K8s isn't fully supported yet, but should be done for app %s with image %s.", appName, image)
@@ -4630,7 +4779,7 @@ func sendAppRequest(ctx context.Context, incomingUrl, appName string, port int, 
 			Action:        *action,
 			ExecutionId:   workflowExecution.ExecutionId,
 			Authorization: workflowExecution.Authorization,
-			Result:        fmt.Sprintf(`{"success": false, "attempts": %d, "reason": "Failed to connect to app %s in swarm. Try the action again, restart Orborus if this is recurring, or contact support@shuffler.io.", "details": "%s"}`, attempts, streamUrl, newerr),
+			Result:        fmt.Sprintf(`{"success": false, "attempts": %d, "reason": "Failed to dispatch execution request to app %s in swarm. Try the action again, restart Orborus if this is recurring, or contact support@shuffler.io.", "details": "%s"}`, attempts, streamUrl, newerr),
 			StartedAt:     int64(time.Now().Unix()),
 			CompletedAt:   int64(time.Now().Unix()),
 			Status:        "FAILURE",
@@ -4639,17 +4788,6 @@ func sendAppRequest(ctx context.Context, incomingUrl, appName string, port int, 
 		// If this happens - send failure signal to stop the workflow?
 		sendSelfRequest(actionResult)
 		return err
-	}
-
-	defer newresp.Body.Close()
-	body, err := ioutil.ReadAll(newresp.Body)
-	if err != nil {
-		log.Printf("[ERROR] Failed reading app request body body: %s", err)
-		return err
-	} else {
-		if debug {
-			log.Printf("[DEBUG][%s] NEWRESP (from app): %s", workflowExecution.ExecutionId, string(body))
-		}
 	}
 
 	return nil
@@ -5172,41 +5310,40 @@ func main() {
 	}
 }
 
-func checkUnfinished(execRequest shuffle.OrborusExecutionRequest) {
+func checkUnfinished(execRequest shuffle.OrborusExecutionRequest) bool {
 	// Meant as a function that periodically checks whether previous executions have finished or not.
 	// Should probably be based on executedIds and finishedIds
 	// Schedule a check in the future instead?
 
 	ctx := context.Background()
 	exec, err := shuffle.GetWorkflowExecution(ctx, execRequest.ExecutionId)
-	log.Printf("[DEBUG][%s] Rechecking execution and it's status to send to backend IF the status is EXECUTING (%s - %d/%d finished)", execRequest.ExecutionId, exec.Status, len(exec.Results), len(exec.Workflow.Actions))
+	if err != nil || exec == nil {
+		log.Printf("[WARNING][%s] Failed reading execution for backend synchronization: %v", execRequest.ExecutionId, err)
+		return false
+	}
+	log.Printf("[DEBUG][%s] Rechecking execution for backend synchronization (%s - %d/%d finished)", execRequest.ExecutionId, exec.Status, len(exec.Results), len(exec.Workflow.Actions))
 
 	// FIXMe: Does this create issue with infinite loops?
 	// Usually caused by issue during startup
 	if exec.Status == "" {
 		//handleRunExecution(resp, request)
-		return
+		return false
 	}
 
-	if exec.Status != "EXECUTING" {
-		return
-	}
-
+	// A terminal result may still need delivery after an earlier backend failure.
 	log.Printf("[DEBUG][%s] Should send full result for execution to backend as it has %d results. Status: %s", execRequest.ExecutionId, len(exec.Results), exec.Status)
 	data, err := json.Marshal(exec)
 	if err != nil {
-		return
+		return false
 	}
 
-	sendResult(*exec, data)
+	if err := sendResult(*exec, data); err != nil {
+		return false
+	}
+	return exec.Status != "EXECUTING"
 }
 
 func processRunExecution(execRequest shuffle.OrborusExecutionRequest) {
-	// Checks if a workflow is done 30 seconds later, and sends info to backend no matter what
-	go func() {
-		time.Sleep(time.Duration(30) * time.Second)
-		checkUnfinished(execRequest)
-	}()
 	window.AddEvent(time.Now())
 
 	ctx := context.Background()
@@ -5268,6 +5405,23 @@ func processRunExecution(execRequest shuffle.OrborusExecutionRequest) {
 	if err != nil {
 		log.Printf("[ERROR][%s] Failed workflowExecution unmarshal: %s", execRequest.ExecutionId, err)
 		return
+	}
+	if workflowExecution.ExecutionId != execRequest.ExecutionId || workflowExecution.Authorization != execRequest.Authorization {
+		log.Printf("[ERROR][%s] Backend returned a different execution identity", execRequest.ExecutionId)
+		return
+	}
+	// Watch only validated runs, until their final state is acknowledged. Deduplicate reruns.
+	if _, running := executionSyncs.LoadOrStore(execRequest.ExecutionId, true); !running {
+		go func() {
+			defer executionSyncs.Delete(execRequest.ExecutionId)
+			ticker := time.NewTicker(30 * time.Second)
+			defer ticker.Stop()
+			for range ticker.C {
+				if checkUnfinished(execRequest) {
+					return
+				}
+			}
+		}()
 	}
 
 	err = setWorkflowExecution(ctx, workflowExecution, true)
@@ -5361,6 +5515,21 @@ func handleDownloadImage(resp http.ResponseWriter, request *http.Request) {
 		return
 	}
 
+	if imageManagerEnabled() {
+		authorization := strings.TrimSpace(request.Header.Get("Authorization"))
+		authorization = strings.TrimSpace(strings.TrimPrefix(authorization, "Bearer "))
+		if err := ensureImage(request.Context(), imageBody.Image, authorization, request.Header.Get("Org-Id"), request.Header.Get("Execution-Id"), true); err != nil {
+			log.Printf("[ERROR] Failed ensuring image %s: %s", imageBody.Image, err)
+			resp.WriteHeader(http.StatusBadGateway)
+			resp.Write([]byte(fmt.Sprintf(`{"success": false, "reason": %q}`, err.Error())))
+			return
+		}
+
+		resp.WriteHeader(http.StatusOK)
+		resp.Write([]byte(`{"success": true, "status": "image ready"}`))
+		return
+	}
+
 	// client, err := dockerclient.NewEnvClient()
 	client, _, err := shuffle.GetDockerClient()
 	if err != nil {
@@ -5407,7 +5576,7 @@ func handleDownloadImage(resp http.ResponseWriter, request *http.Request) {
 	log.Printf("[INFO] Downloading image %s", imageBody.Image)
 	err = shuffle.DownloadDockerImageBackend(&http.Client{Timeout: imagedownloadTimeout}, imageBody.Image)
 	if err == nil {
-		downloadedImages = append(downloadedImages, imageBody.Image)
+		downloadedImages.Store(imageBody.Image, true)
 	}
 
 	// return success

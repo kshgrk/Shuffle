@@ -106,10 +106,10 @@ spec:
           {{- else if ne .Values.orborus.resourcesPreset "none" }}
           resources: {{- include "common.resources.preset" (dict "type" .Values.orborus.resourcesPreset) | nindent 12 }}
           {{- end }}
+          {{- if .Values.orborus.extraContainerPorts }}
           ports:
-            {{- if .Values.orborus.extraContainerPorts }}
             {{- include "common.tplvalues.render" (dict "value" .Values.orborus.extraContainerPorts "context" $) | nindent 12 }}
-            {{- end }}
+          {{- end }}
           {{- if not .Values.diagnosticMode.enabled }}
           {{- if .Values.orborus.customLivenessProbe }}
           livenessProbe: {{- include "common.tplvalues.render" (dict "value" .Values.orborus.customLivenessProbe "context" $) | nindent 12 }}

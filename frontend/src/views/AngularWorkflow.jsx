@@ -105,6 +105,7 @@ import {
   PlayArrow as PlayArrowIcon,
   AspectRatio as AspectRatioIcon,
   MoreVert as MoreVertIcon,
+  MoreHoriz as MoreHorizIcon,
   Apps as AppsIcon,
   Schedule as ScheduleIcon,
   FavoriteBorder as FavoriteBorderIcon,
@@ -165,9 +166,9 @@ import ExtraApps from "../components/ExtraApps.jsx"
 import EditWorkflow from "../components/EditWorkflow.jsx"
 import HighlightedValueInSearch from "../components/HighlightedValueInSearch.jsx"
 import { act } from "react";
-import { Context } from "../context/ContextApi.jsx";
+import { Context, isCloud } from "../context/ContextApi.jsx";
 import WorkflowGenerationModal from "../components/WorkflowGenerationModal.jsx";
-import AgentChatWidget from "../components/AgentChatWidget.jsx";
+import { useWorkflowDock, WorkflowDockTabs, WorkflowAgentSidebar } from "../components/WorkflowAgentDock.jsx";
 import WorkflowHistory from "../components/WorkflowHistory.jsx";
 import CodeMirror from '@uiw/react-codemirror';
 import { python } from '@codemirror/lang-python';
@@ -175,156 +176,7 @@ import { vscodeDark } from '@uiw/codemirror-theme-vscode';
 
 cytoscape.use(edgehandles);
 
-export const triggers = [
-  {
-    name: "Webhook",
-    type: "TRIGGER",
-    parameters : [
-      {
-          "name": "url",
-          "example": "",
-          "value": ""
-      },
-      {
-          "name": "tmp",
-          "example": "",
-          "value": "",
-      },
-      {
-        "name": "auth_headers",
-        "example": "",
-        "value": "",
-      },
-      {
-        "name": "custom_response_body",
-        "example": "",
-        "value": "",
-      },
-      {
-        "name": "await_response",
-        "example": "",
-        "value": "v1",
-      },
-    ],
-    status: "uninitialized",
-    trigger_type: "WEBHOOK",
-    errors: null,
-    large_image:
-      "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNDgiIGhlaWdodD0iNDgiIHZpZXdCb3g9IjAgMCA0OCA0OCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHJlY3Qgd2lkdGg9IjQ4IiBoZWlnaHQ9IjQ4IiByeD0iOCIgZmlsbD0iIzIxQTBCRCIvPgo8cGF0aCBkPSJNMjMuOTYxNyAxOC4wOTk0QzI1LjAwMDQgMTguMDY5NiAyNS42ODE3IDE5LjE3NTIgMjUuMTg4MiAyMC4wODk2TDI1LjE3NDYgMjAuMTE1TDI1LjE5MDIgMjAuMTM5NEwyNy45ODMyIDI0LjY4MDRMMjguMDA0NiAyNC43MTU2TDI4LjA0MzcgMjQuN0MyOC41MzgzIDI0LjUwMDcgMjkuMDY3MSAyNC4zOTgyIDI5LjYwMDMgMjQuMzk4MkMzMS4wODE0IDI0LjM5ODkgMzIuNDQ5OSAyNS4xODkyIDMzLjE5MTIgMjYuNDcxNEMzNC43ODk2IDI5LjIzNzMgMzIuNzk0OCAzMi42OTY1IDI5LjYwMDMgMzIuNjk4QzI5LjM2ODEgMzIuNjk4IDI5LjE1MzkgMzIuNTczOSAyOS4wMzc4IDMyLjM3MjhDMjguNzg3NyAzMS45Mzk1IDI5LjEgMzEuMzk4MiAyOS42MDAzIDMxLjM5ODJDMzEuMjA2NyAzMS4zOTg4IDMyLjQ5NjEgMzAuMDcyMyAzMi40NSAyOC40NjY2QzMyLjM4NjcgMjYuMjczNiAyOS45NzM3IDI0Ljk3MTYgMjguMTA2MiAyNi4xMjI4QzI3LjgwMDggMjYuMzEwOCAyNy40MDAxIDI2LjIxNSAyNy4yMTE3IDI1LjkwOTlIMjcuMjEyNkwyNC4wODE4IDIwLjgyMkwyNC4wNjcxIDIwLjc5ODZIMjQuMDAwN0MyMy41MzIzIDIwLjc5ODYgMjMuMDk3MSAyMC41NTU4IDIyLjg1MTMgMjAuMTU3QzIyLjMwNjIgMTkuMjcyMyAyMi45MjMgMTguMTI5MyAyMy45NjE3IDE4LjA5OTRaTTE1LjA4MDggMjYuMDU3NEMxNS4zODE0IDI1LjY1NzIgMTYuMDAyNiAyNS43MzI4IDE2LjE5OSAyNi4xOTMxQzE2LjI3ODcgMjYuMzgwMSAxNi4yNjU3IDI2LjU5MTkgMTYuMTY3NyAyNi43NjY0TDE2LjEyMDggMjYuODM4NkMxNS43NDkxIDI3LjMzMSAxNS41NDg1IDI3LjkzMTYgMTUuNTUwNSAyOC41NDg2QzE1LjU1MDcgMzAuNzQyMyAxNy45MjYxIDMyLjExMzIgMTkuODI1OSAzMS4wMTY0QzIwLjcwNzUgMzAuNTA3MyAyMS4yNTA2IDI5LjU2NjYgMjEuMjUwNyAyOC41NDg2QzIxLjI1MDcgMjguMTg5NyAyMS41NDE0IDI3Ljg5ODQgMjEuOTAwMSAyNy44OTgySDI4LjQxNzdMMjguNDMyNCAyNy44NzM4QzI4Ljk1MiAyNi45NzM4IDMwLjI1MTYgMjYuOTczOCAzMC43NzEyIDI3Ljg3MzhDMzEuMjkwMyAyOC43NzM3IDMwLjY0MDMgMjkuODk4MiAyOS42MDEzIDI5Ljg5ODJDMjkuMTE5MiAyOS44OTgxIDI4LjY3MzUgMjkuNjQwOSAyOC40MzI0IDI5LjIyMzRMMjguNDE3NyAyOS4xOThIMjIuNDk4OEwyMi40OTE5IDI5LjI0QzIxLjk1OTcgMzIuMzg5NyAxOC4yMTc0IDMzLjc4MjIgMTUuNzU1NiAzMS43NDY4QzE0LjA0ODEgMzAuMzM0NyAxMy43NTA4IDI3LjgyOTYgMTUuMDgwOCAyNi4wNTc0Wk0yMC42NjA5IDE2Ljk5QzIyLjU1NTQgMTQuNDE3OSAyNi41MjQxIDE0Ljg2MTIgMjcuODA0NCAxNy43ODc4QzI3Ljg5NzMgMTguMDAwOCAyNy44NjkxIDE4LjI0NzQgMjcuNzMxMiAxOC40MzQzQzI3LjQzNCAxOC44MzY0IDI2LjgxMzQgMTguNzY2NCAyNi42MTMgMTguMzA4M1YxOC4zMDc0QzI1Ljk0NTQgMTYuNzc5MyAyNC4xMTM0IDE2LjE0ODUgMjIuNjQ2MiAxNi45NDEyQzIwLjcxNjIgMTcuOTg0IDIwLjYzODYgMjAuNzI1NiAyMi41MDY2IDIxLjg3NTdDMjIuODEyIDIyLjA2MzkgMjIuOTA3MyAyMi40NjM3IDIyLjcxOTUgMjIuNzY5M0wxOS41ODk2IDI3Ljg1NjJMMTkuNTc1IDI3Ljg4MDZMMTkuNTg4NiAyNy45MDZDMjAuMDc1IDI4LjgwNTUgMTkuNDIzNiAyOS44OTgzIDE4LjQwMTEgMjkuODk4MkMxNy45MTk2IDI5Ljg5NzggMTcuNDc0MyAyOS42NDEyIDE3LjIzMzIgMjkuMjI0NEMxNi43MTI5IDI4LjMyNDggMTcuMzYxOSAyNy4xOTg4IDE4LjQwMTEgMjcuMTk4SDE4LjQ2NzVMMTguNDgyMiAyNy4xNzQ2TDIxLjI3NjEgMjIuNjM1NUwyMS4yOTg2IDIyLjU5OTRMMjEuMjY2NCAyMi41NzFDMTkuNjQ2MSAyMS4xNTAxIDE5LjM4MjkgMTguNzI1MiAyMC42NjA5IDE2Ljk5WiIgZmlsbD0id2hpdGUiIHN0cm9rZT0iIzIxQTBCRCIgc3Ryb2tlLXdpZHRoPSIwLjEiLz4KPC9zdmc+Cg==",
-    is_valid: true,
-    label: "Webhook",
-    environment: "onprem",
-    description: "Custom HTTP input trigger",
-    long_description: "Execute a workflow with an unauthicated POST request",
-    id: "",
-  },
-  {
-    name: "Schedule",
-    type: "TRIGGER",
-    parameters : [
-      {
-          "name": "cron",
-          "example": "",
-          "value": "*/25 * * * *"
-      },
-      {
-          "name": "execution_argument",
-          "example": "",
-          "value": "",
-      },
-    ],
-    status: "uninitialized",
-    trigger_type: "SCHEDULE",
-    errors: null,
-    large_image: "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNDgiIGhlaWdodD0iNDgiIHZpZXdCb3g9IjAgMCA0OCA0OCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHJlY3Qgd2lkdGg9IjQ4IiBoZWlnaHQ9IjQ4IiByeD0iOCIgZmlsbD0iI0UzQTQxQiIvPgo8cmVjdCB3aWR0aD0iMjQiIGhlaWdodD0iMjQiIHRyYW5zZm9ybT0idHJhbnNsYXRlKDEyIDEyKSIgZmlsbD0iI0UzQTQxQiIvPgo8Y2lyY2xlIGN4PSIyNCIgY3k9IjI0IiByPSI4Ljc1IiBzdHJva2U9IndoaXRlIiBzdHJva2Utd2lkdGg9IjEuNSIvPgo8cGF0aCBkPSJNMjguNSAyNEgyNC4yNUMyNC4xMTE5IDI0IDI0IDIzLjg4ODEgMjQgMjMuNzVWMjAuNSIgc3Ryb2tlPSJ3aGl0ZSIgc3Ryb2tlLXdpZHRoPSIxLjUiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIvPgo8L3N2Zz4=",
-    label: "Schedule",
-    is_valid: true,
-    environment: "onprem",
-    description: "Schedule time trigger",
-    long_description: "Create a schedule based on cron",
-    id: "",
-  },
-  {
-    name: "Pipelines",
-    type: "TRIGGER",
-    status: "uninitialized",
-    description: "Run a pipeline trigger",
-    trigger_type: "PIPELINE",
-    errors: null,
-    is_valid: true,
-    label: "Pipeline",
-    environment: "onprem",
-    large_image: "/images/workflows/tenzir2.png",
-    long_description: "Controls a pipeline to run things",
-    id: "",
-  },
-  {
-    name: "Shuffle Workflow",
-    type: "TRIGGER",
-    status: "uninitialized",
-    trigger_type: "SUBFLOW",
-    errors: null,
-    large_image: "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNDgiIGhlaWdodD0iNDgiIHZpZXdCb3g9IjAgMCA0OCA0OCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHJlY3Qgd2lkdGg9IjQ4IiBoZWlnaHQ9IjQ4IiByeD0iOCIgZmlsbD0idXJsKCNwYWludDBfbGluZWFyXzMxN181OTcpIi8+CjxwYXRoIGQ9Ik0xNS45OTk4IDE2LjAwMTVMMTUuOTk5OCAyNS43NDA2TDE5LjIwMDEgMjUuNzQwNkwxOS4yMDAxIDE5LjI0ODVMMzEuOTk5OCAxOS4yNDg1TDMxLjk5OTggMTYuMDAxNUwxNS45OTk4IDE2LjAwMTVaIiBmaWxsPSJ3aGl0ZSIvPgo8cGF0aCBkPSJNMjguNzk5NCAyMi4yNjE3TDI4Ljc5OTQgMjguNzUzOEwxNS45OTk4IDI4Ljc1MzhMMTUuOTk5OCAzMi4wMDA4TDMxLjk5OTggMzIuMDAwOEwzMS45OTk4IDIyLjI2MTdMMjguNzk5NCAyMi4yNjE3WiIgZmlsbD0id2hpdGUiLz4KPHBhdGggZD0iTTI1LjczOSAyMi4yNjE3TDIyLjI2MDcgMjIuMjYxN0wyMi4yNjA3IDI1Ljc0TDI1LjczOSAyNS43NEwyNS43MzkgMjIuMjYxN1oiIGZpbGw9IndoaXRlIi8+CjxkZWZzPgo8bGluZWFyR3JhZGllbnQgaWQ9InBhaW50MF9saW5lYXJfMzE3XzU5NyIgeDE9Ii03LjcwNzc2ZS0wOSIgeTE9IjI3LjA3NjkiIHgyPSI0OC4wMDE0IiB5Mj0iMjYuOTM3NyIgZ3JhZGllbnRVbml0cz0idXNlclNwYWNlT25Vc2UiPgo8c3RvcCBzdG9wLWNvbG9yPSIjRkY4NDQ0Ii8+CjxzdG9wIG9mZnNldD0iMSIgc3RvcC1jb2xvcj0iI0YyNjQzQiIvPgo8L2xpbmVhckdyYWRpZW50Pgo8L2RlZnM+Cjwvc3ZnPgo=",
-    is_valid: true,
-    label: "Subflow",
-    environment: "onprem",
-    description: "Run a Subflow trigger",
-    long_description: "Execute another workflow from this workflow",
-    id: "",
-  },
-  {
-    name: "User Input",
-    type: "TRIGGER",
-    parameters: [
-      {
-          "name": "alertinfo",
-          "example": "",
-          "value": "## Stop or continue?\n\nDetails: $exec",
-      },
-      {
-          "name": "options",
-          "example": "",
-          "value": "boolean",
-      },
-      {
-          "name": "type",
-          "example": "",
-          "value": "subflow",
-      },
-      {
-          "name": "email",
-          "example": "",
-          "value": "test@test.com",
-      },
-      {
-          "name": "sms",
-          "example": "",
-          "value": "0000000",
-      },
-      {
-          "name": "subflow",
-          "example": "",
-          "value": "",
-      },
-      {
-          "name": "subflow_failure",
-          "example": "",
-          "value": "",
-      }
-    ],
-    status: "running",
-    large_image: "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNDgiIGhlaWdodD0iNDgiIHZpZXdCb3g9IjAgMCA0OCA0OCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHJlY3Qgd2lkdGg9IjQ4IiBoZWlnaHQ9IjQ4IiByeD0iOCIgZmlsbD0iIzg2MzZCNCIvPgo8cGF0aCBkPSJNMjEuMjgyMiAxNi43VjE0LjdNMTYuNzgyMiAyMS4ySDE0Ljc4MjJNMTcuOTc5MSAyNC41MDMyTDE2LjU2NDkgMjUuOTE3NE0yNS45OTk3IDE2LjQ4MjRMMjQuNTg1NCAxNy44OTY2TTE2LjU2NDggMTYuNDgyNUwxNy45NzkgMTcuODk2N00yNS4yODk4IDMyLjM1MDRMMjYuNzc3NyAyOC40NTc4QzI2Ljk3OTYgMjcuOTI5NSAyNy40NDggMjcuNTQ5IDI4LjAwNjUgMjcuNDU5N0wzMS42MjY0IDI2Ljg4MDVDMzMuMTkwOSAyNi42MzAyIDMzLjQ1ODUgMjQuNDkxNiAzMi4wMDQgMjMuODYzNEwyMi4zNDUyIDE5LjY5MjdDMjEuMTc1MSAxOS4xODc0IDE5LjkxNzkgMjAuMjAxMyAyMC4xNjQgMjEuNDUxOUwyMi4yNTczIDMyLjA5MDhDMjIuNTY0MyAzMy42NTEgMjQuNzIyMSAzMy44MzU4IDI1LjI4OTggMzIuMzUwNFoiIHN0cm9rZT0id2hpdGUiIHN0cm9rZS13aWR0aD0iMS4yNSIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIi8+Cjwvc3ZnPgo=",
-    description: "Wait for user input trigger",
-    trigger_type: "USERINPUT",
-    is_valid: true,
-    errors: null,
-    label: "User input",
-    environment: "cloud",
-    long_description: "Take user input to continue execution",
-    id: "",
-  }
-];
-// Adds specific text to items
+import { triggers, sortByKey, SetJsonDotnotation, green, yellow, red, grey, removeParam, removeActionState } from "../utils/workflowHelpers.js";
 
 // https://stackoverflow.com/questions/19014250/rerender-view-on-browser-resize-with-react
 function useWindowSize() {
@@ -339,198 +191,6 @@ function useWindowSize() {
     return () => window.removeEventListener("resize", updateSize);
   }, []);
   return size;
-}
-
-export function sortByKey(array, key) {
-  if (array === undefined) {
-    return [];
-  }
-
-  if (key.startsWith("-") && key.length > 2) {
-    key = key.slice(1, key.length);
-    return array
-      .sort(function (a, b) {
-        var x = a[key];
-        var y = b[key];
-        return x < y ? -1 : x > y ? 1 : 0;
-      })
-      .reverse();
-  }
-
-  if (array === undefined || array === null) {
-    return [];
-  }
-
-  return array.sort(function (a, b) {
-    var x = a[key];
-    var y = b[key];
-    return x < y ? -1 : x > y ? 1 : 0;
-  });
-}
-
-// look for keys and set values with shuffle dotnotation 
-// used primarily for AI autocompletions
-export function SetJsonDotnotation(jsonInput, inputKey) {
-
-  if (jsonInput === undefined || jsonInput === null) {
-    return jsonInput;
-  }
-
-  // Check for array
-  if (Array.isArray(jsonInput)) {
-    for (var i = 0; i < jsonInput.length; i++) {
-      jsonInput[i] = SetJsonDotnotation(jsonInput[i], inputKey + ".#");
-    }
-
-    return jsonInput;
-    // Check for dict
-  } else if (typeof jsonInput === "object") {
-    // Loop keys and values
-
-    for (var key in jsonInput) {
-      if (!jsonInput.hasOwnProperty(key)) {
-        continue
-      }
-
-      const value = jsonInput[key];
-      // Check if array
-      if (Array.isArray(value)) {
-        for (var i = 0; i < value.length; i++) {
-          jsonInput[key][i] = SetJsonDotnotation(jsonInput[key][i], inputKey + "." + key + ".#");
-        }
-      } else if (typeof value === "object") {
-        jsonInput[key] = SetJsonDotnotation(jsonInput[key], inputKey + "." + key);
-      } else {
-        jsonInput[key] = inputKey + "." + key
-      }
-    }
-  } else {
-    //jsonInput = inputKey
-
-    console.log("SetJsonDotnotation: jsonInput is not an object or array, but key ", jsonInput, typeof jsonInput);
-  }
-
-  return jsonInput;
-}
-
-
-//export const green = "#86c142";
-export const green = "#2BC07E"
-export const yellow = "#FFC633";
-export const red = "#F53434";
-export const grey = "#b0b0b0";
-
-export function removeParam(key, sourceURL) {
-  if (sourceURL === undefined) {
-    return;
-  }
-
-  var rtn = sourceURL.split("?")[0],
-    param,
-    params_arr = [],
-    queryString = sourceURL.indexOf("?") !== -1 ? sourceURL.split("?")[1] : "";
-
-  if (queryString !== "") {
-    params_arr = queryString.split("&");
-    for (let i = params_arr.length - 1; i >= 0; i -= 1) {
-      param = params_arr[i].split("=")[0];
-      if (param === key) {
-        params_arr.splice(i, 1);
-      }
-    }
-    rtn = rtn + "?" + params_arr.join("&");
-  }
-
-  if (rtn === "?") {
-    return "";
-  }
-
-  return rtn;
-}
-
-const ACTION_STATES_STORAGE_KEY = "shuffle_action_tab_states";
-
-export function getActionState(actionId, workflowId = null) {
-  const defaultState = {
-    tab: "setup",
-    showOptionalParams: false,
-    userSelectedTab: false,
-  };
-
-  try {
-    const stored = localStorage.getItem(ACTION_STATES_STORAGE_KEY);
-    if (!stored) return defaultState;
-
-    const allStates = JSON.parse(stored);
-    
-    // Handle both old flat structure and new nested structure for backward compatibility
-    let actionState = {};
-    if (workflowId && allStates[workflowId] && allStates[workflowId][actionId]) {
-      // New nested structure: workflowId -> actionId -> state
-      actionState = allStates[workflowId][actionId];
-    }
-
-    // Validate tab value
-    const validTabs = ["setup", "configuration"];
-    const tab = validTabs.includes(actionState.tab) ? actionState.tab : defaultState.tab;
-
-    return {
-      tab,
-      showOptionalParams: actionState.showOptionalParams === true,
-      userSelectedTab: actionState.userSelectedTab === true,
-    };
-  } catch (e) {
-    return defaultState;
-  }
-}
-
-export function setActionState(actionId, updates, workflowId = null) {
-  if (!actionId || !updates) return;
-
-  try {
-    const stored = localStorage.getItem(ACTION_STATES_STORAGE_KEY);
-    const allStates = stored ? JSON.parse(stored) : {};
-
-    if (workflowId) {
-      // New nested structure: workflowId -> actionId -> state
-      if (!allStates[workflowId]) {
-        allStates[workflowId] = {};
-      }
-      if (!allStates[workflowId][actionId]) {
-        allStates[workflowId][actionId] = {};
-      }
-      Object.assign(allStates[workflowId][actionId], updates);
-    }
-
-    localStorage.setItem(ACTION_STATES_STORAGE_KEY, JSON.stringify(allStates));
-  } catch (e) {
-    console.error("Failed to save action state:", e);
-  }
-}
-
-// Will use this function to remove the action data when the node will get removed from the cytoscape.
-export function removeActionState(actionId, workflowId = null) {
-  if (!actionId) return;
-
-  try {
-    const stored = localStorage.getItem(ACTION_STATES_STORAGE_KEY);
-    if (!stored) return;
-
-    const allStates = JSON.parse(stored);
-    
-    if (workflowId && allStates[workflowId]) {
-      delete allStates[workflowId][actionId];
-      
-      // Clean up empty workflow objects
-      if (Object.keys(allStates[workflowId]).length === 0) {
-        delete allStates[workflowId];
-      }
-    }
-
-    localStorage.setItem(ACTION_STATES_STORAGE_KEY, JSON.stringify(allStates));
-  } catch (e) {
-    console.error("Failed to remove action state:", e);
-  }
 }
 
 const splitter = "|~|";
@@ -636,6 +296,7 @@ const AngularWorkflow = (defaultprops) => {
   const [variablesModalOpen, setVariablesModalOpen] = React.useState(false);
   const [aiQueryModalOpen, setAiQueryModalOpen] = React.useState(false)
   const [workflowGenerationModalOpen, setWorkflowGenerationModalOpen] = React.useState(false);
+
   const [workflowDescription, setWorkflowDescription] = React.useState("");
   const [executionVariablesModalOpen, setExecutionVariablesModalOpen] =
     React.useState(false);
@@ -735,6 +396,55 @@ const AngularWorkflow = (defaultprops) => {
 
   const [executionRunning, setExecutionRunning] = React.useState(false);
   const [executionModalOpen, setExecutionModalOpen] = React.useState(false);
+
+  // The docked run panel has no backdrop to click away, so it gets its own close button and Esc.
+  // Dropping execution_id keeps it from reopening on the next load.
+  const closeDockedRunPanel = () => {
+    setExecutionModalOpen(false)
+    navigate(window.location.pathname + (removeParam("execution_id", window.location.search) || ""), { replace: true })
+  }
+
+  // The agent chat, node config and run panels share the right dock (components/WorkflowAgentDock.jsx)
+  const configOpen = rightSideBarOpen && [selectedAction, selectedTrigger, selectedComment, selectedEdge].some((item) => Object.getOwnPropertyNames(item || {}).length > 0)
+  const dock = useWorkflowDock({
+    isMobile,
+    agentOpen: workflowGenerationModalOpen && !!workflow?.id && workflow.public !== true,
+    configOpen,
+    configKey: configOpen ? selectedAction.id || selectedTrigger.id || selectedComment.id || selectedEdge.id || "open" : "",
+    runOpen: executionModalOpen,
+    onCloseRunPanel: closeDockedRunPanel,
+    cy,
+  })
+  const { docked, dockTabHeight, shownTab, configHidden, dockWidth, rightPanelsWidth, isAgentPanelKey } = dock
+
+  // Bottom toolbar: centred on the canvas area that is actually visible (from the canvas' left edge to where the
+  // docked right panels start). Measured, since page margins and the left panels aren't all in leftBarSize.
+  const [bottomBarEl, setBottomBarEl] = React.useState(null)
+  const [bottomBarSpace, setBottomBarSpace] = React.useState(null)
+  const [bottomMoreAnchor, setBottomMoreAnchor] = React.useState(null)
+  const bottomBarFullWidthRef = React.useRef(760)
+  React.useEffect(() => {
+    if (!bottomBarEl) return
+    const measure = () => {
+      const canvas = document.getElementById("cytoscape_view")
+      const parent = bottomBarEl.offsetParent
+      if (!canvas || !parent) return
+      if (bottomBarEl.dataset.compact !== "true") {
+        bottomBarFullWidthRef.current = bottomBarEl.offsetWidth
+      }
+      const rect = canvas.getBoundingClientRect()
+      const left = Math.max(rect.left, 0)
+      const right = Math.min(rect.right, window.innerWidth - rightPanelsWidth)
+      setBottomBarSpace({ center: (left + right) / 2 - parent.getBoundingClientRect().left, width: right - left })
+    }
+    measure()
+    const timer = setTimeout(measure, 350) // again once the 0.3s panel/margin transitions have settled
+    window.addEventListener("resize", measure)
+    return () => {
+      clearTimeout(timer)
+      window.removeEventListener("resize", measure)
+    }
+  }, [bottomBarEl, rightPanelsWidth, leftBarSize, leftSideBarOpenByClick])
   const [executionModalView, setExecutionModalView] = React.useState(0);
   const [executionData, setExecutionData] = React.useState({});
   const [appsLoaded, setAppsLoaded] = React.useState(false);
@@ -743,6 +453,8 @@ const AngularWorkflow = (defaultprops) => {
   const [userediting, setUserediting] = React.useState(false)
 
   const [lastSaved, setLastSaved] = React.useState(true);
+  const lastSavedRef = React.useRef(lastSaved)
+  lastSavedRef.current = lastSaved
   const skipUnloadWarningRef = React.useRef(false);
   
   // Expose ref on window so WorkflowHistory can set it before reload
@@ -795,6 +507,11 @@ const AngularWorkflow = (defaultprops) => {
   const [executionArgumentModalOpen, setExecutionArgumentModalOpen] = React.useState(false);
   const [searchModalOpen, setSearchModalOpen] = React.useState(false);
   const [buildDebugMode, setBuildDebugMode] = useState("build"); // "build" or "debug"
+  // The toggle follows the run panel however it was opened (a run here, the agent, a link),
+  // so Build always closes it
+  useEffect(() => {
+    setBuildDebugMode(executionModalOpen ? "debug" : "build")
+  }, [executionModalOpen])
 
   useEffect(() => {
     if (!firstrequest && isLoaded && isLoggedIn && editWorkflowModalOpen === false) {
@@ -1738,7 +1455,6 @@ const AngularWorkflow = (defaultprops) => {
       props.userdata.active_org !== undefined
       ? props.userdata.active_org.cloud_sync === true
       : false;
-  const isCloud = window.location.host === "localhost:3002" || window.location.host === "shuffler.io" || window.location.host === "migration.shuffler.io";
 
   const trackFunnel = (action, extra = {}) => {
     if (isCloud && ReactGA !== undefined) {
@@ -1770,7 +1486,7 @@ const AngularWorkflow = (defaultprops) => {
   const classes = useStyles();
 
   var [bodyWidth, bodyHeight] = useWindowSize()
-  const cytoscapeWidth = isMobile ? bodyWidth - leftBarSize : bodyWidth - leftBarSize - 25
+  const cytoscapeWidth = (isMobile ? bodyWidth - leftBarSize : bodyWidth - leftBarSize - 25) - rightPanelsWidth
 
   /*
   // Zoom testing to try autofixing for small screens
@@ -1826,8 +1542,13 @@ const AngularWorkflow = (defaultprops) => {
         cy.removeListener("free");
         cy.removeListener("cxttap");
 
-        setTimeout(() => {
-          setupGraph(workflow)
+        setTimeout(async () => {
+          // Drawing is async: nodes added with the listeners on would be broadcast as the user's own edits
+          try {
+            await setupGraph(workflow)
+          } catch (error) {
+            console.log("Error drawing the workflow: ", error)
+          }
 
           cy.on("select", "node", (e) => {
             onNodeSelect(e, appAuthentication);
@@ -3067,7 +2788,6 @@ const AngularWorkflow = (defaultprops) => {
 
 
   const saveWorkflow = (curworkflow, executionArgument, startNode, duplicationOrg, skip_popup) => {
-    var success = false;
 
     if (isCloud && !isLoggedIn) {
       console.log("Should redirect to register with redirect.")
@@ -3406,7 +3126,8 @@ const AngularWorkflow = (defaultprops) => {
     */
 
     setLastSaved(true);
-    fetch(`${globalUrl}/api/v1/workflows/${useworkflow.id}`, {
+    // Returned at the end, so callers that must wait for the save (the agent) can
+    const savePromise = fetch(`${globalUrl}/api/v1/workflows/${useworkflow.id}`, {
       method: "PUT",
       headers: headers,
       body: JSON.stringify(useworkflow),
@@ -3464,7 +3185,6 @@ const AngularWorkflow = (defaultprops) => {
             window.location.pathname = "/workflows/" + responseJson.new_id;
           }
 
-          success = true;
           if (responseJson.errors !== undefined) {
             workflow.errors = responseJson.errors;
             if (responseJson.errors.length === 0) {
@@ -3564,7 +3284,7 @@ const AngularWorkflow = (defaultprops) => {
       setOriginalWorkflow(useworkflow)
     }
 
-    return success
+    return savePromise
   };
 
   const fixExample = (input, required) => {
@@ -4372,7 +4092,7 @@ const AngularWorkflow = (defaultprops) => {
 
   // Stream op dispatch
   // Switch on "item:type" — same strings the backend sends over the wire.
-  const onStreamOpReceived = (op) => {
+  const onStreamOpReceived = (op, replayed) => {
     if (!op.item) return
 
     // Handle system ops
@@ -4413,6 +4133,15 @@ const AngularWorkflow = (defaultprops) => {
 
     if (!op.type) return
 
+    // The agent saves its edits itself, so applying them must not mark the workflow unsaved
+    let savedBeforeAgentOp = op.user_id === "agent" ? lastSavedRef.current : undefined
+    if (savedBeforeAgentOp !== undefined && replayed && cy && (op.item === "node" || op.item === "edge")) {
+      const exists = cy.getElementById(op.id).length > 0
+      if ((op.type === "add" && !exists) || (op.type === "remove" && exists)) {
+        savedBeforeAgentOp = false
+      }
+    }
+
     switch (op.item + ":" + op.type) {
 
       case "system:init_complete":
@@ -4438,6 +4167,8 @@ const AngularWorkflow = (defaultprops) => {
       default:
         break
     }
+
+    if (savedBeforeAgentOp !== undefined) setLastSaved(savedBeforeAgentOp)
   }
 
 
@@ -4971,6 +4702,18 @@ const AngularWorkflow = (defaultprops) => {
     }
   }
 
+  // Shows a run the agent started in the debug view, the same way as a run started here
+  const openAgentExecution = (executionId, authorization) => {
+    navigate(`?execution_id=${executionId}`)
+    setBuildDebugMode("debug")
+    setExecutionRunning(true)
+    setExecutionRequest({ execution_id: executionId, authorization: authorization })
+    setExecutionData({})
+    setExecutionModalOpen(true)
+    setExecutionModalView(1)
+    start()
+  }
+
   const handleAgentStopped = () => {
     // Remove immediately from local state — no need to wait for network round-trip.
     setConnectedUsers(prev => prev.filter(u => u.user_id !== "agent"))
@@ -5256,7 +4999,7 @@ const AngularWorkflow = (defaultprops) => {
       })
   }
 
-  const getWorkflow = (workflow_id, sourcenode) => {
+  const getWorkflow = (workflow_id, sourcenode, redraw) => {
     fetch(`${globalUrl}/api/v1/workflows/${workflow_id}`, {
       method: "GET",
       headers: {
@@ -5595,6 +5338,15 @@ const AngularWorkflow = (defaultprops) => {
 		  		setupWorkflowYaml(responseJson) 
 			  }, 2500)
 		  }
+
+          // Drawing only adds nodes, so removed ones would stay. The [workflow] effect redraws and re-adds the listeners.
+          if (redraw && cy) {
+            cy.elements().unselect()
+            for (const event of ["select", "unselect", "add", "remove"]) {
+              cy.removeListener(event)
+            }
+            cy.elements().remove()
+          }
 
           setWorkflow(responseJson);
           setWorkflowDone(true);
@@ -8798,12 +8550,16 @@ const AngularWorkflow = (defaultprops) => {
 
   //var previouskey = 0
   const handleKeyDown = (event) => {
+    // Keys pressed in the agent sidebar (on its buttons, its messages) are not canvas shortcuts.
+    // The open sidebar alone doesn't block them: it stays docked while the canvas is used.
+    if (isAgentPanelKey(event)) {
+      return
+    }
 
     // Check if any modal or sidebar is open - if so, disable custom shortcuts
     var isAnyModalOrSidebarOpen =
       variablesModalOpen ||
       aiQueryModalOpen ||
-      workflowGenerationModalOpen ||
       executionVariablesModalOpen ||
       authenticationModalOpen ||
       conditionsModalOpen ||
@@ -14192,6 +13948,21 @@ const AngularWorkflow = (defaultprops) => {
     zoom: isSafari ? undefined : 0.9,
     transform: isSafari ? "scale(0.9)" : undefined,
     transformOrigin: isSafari ? "top right" : undefined,
+    // The 0.9 zoom shrinks sizes and offsets, so they're divided by it (Safari's top-right scale leaves offsets alone)
+    ...(docked ? {
+      top: dockTabHeight / (isSafari ? 1 : 0.9),
+      right: 0,
+      height: `calc((100vh - ${dockTabHeight}px) / 0.9)`,
+      maxHeight: "none",
+      width: dockWidth / 0.9,
+      minWidth: dockWidth / 0.9,
+      maxWidth: dockWidth / 0.9,
+      resize: "none",
+      border: "none",
+      // The same edge as the other dock tabs
+      borderLeft: theme.palette.defaultBorder,
+      borderRadius: 0,
+    } : {}),
   };
 
   const setTriggerFolderWrapperMulti = (event) => {
@@ -20274,20 +20045,20 @@ const AngularWorkflow = (defaultprops) => {
   const cytoscapeViewWidths = isMobile ? 50 : 950;
   const bottomBarStyle = {
     position: "absolute",
-    left: `${leftBarSize + (cytoscapeWidth / 2)}px`,
+    left: bottomBarSpace ? bottomBarSpace.center : leftBarSize + (cytoscapeWidth / 2),
     transform: "translateX(-50%)",
     bottom: 20,
     zIndex: 10,
-    display: "flex",
-    justifyContent: "center",
-    alignItems: "center",
+    // Without this an absolute box starting mid-canvas is only allowed the width up to the edge, and the row spills out
+    width: "max-content",
+    transition: "left 0.3s ease",
   };
 
   const topBarStyle = {
     position: "absolute",
     top: 10,
     transform: `translateX(${leftBarSize}px)`,
-    width: bodyWidth - leftBarSize + 25,
+    width: bodyWidth - leftBarSize + 25 - rightPanelsWidth,
     transition: "all 0.3s ease",
     paddingLeft : 30,
     zoom: isSafari ? undefined : 0.9,
@@ -20357,8 +20128,9 @@ const AngularWorkflow = (defaultprops) => {
 		  })
 		}
 
-  const TopCytoscapeBar = (props) => {
-    const [hovered, setHovered] = useState(false)
+  // Called as a function, not rendered as <TopCytoscapeBar />: it is redefined on every render,
+  // so as a component React would remount the whole bar each time (visible flicker during agent runs)
+  const TopCytoscapeBar = () => {
 
      const toggleButtonSx = {
         textTransform: "none",
@@ -20401,10 +20173,20 @@ const AngularWorkflow = (defaultprops) => {
       return null
     }
 
+    // With side panels open the canvas gets narrow: let the bar wrap instead of overlapping
+    const compactBar = rightPanelsWidth > 0 && (bodyWidth - leftBarSize - rightPanelsWidth) < 1100
+
     const isCorrectOrg = workflow?.public === true || userdata?.active_org.id === undefined || userdata?.active_org.id === null || workflow?.org_id === null || workflow?.org_id === undefined || workflow?.org_id?.length === 0 || userdata?.active_org?.id === workflow?.org_id
 
     return (
-      <div style={topBarStyle}>
+      <div style={topBarStyle} ref={(el) => {
+        // With docked panels, size the bar from where it really starts so it ends at the panels.
+        // zoom scales width, translate and padding, so the fixed width above overshoots them.
+        if (!el || rightPanelsWidth === 0) return
+        const zoom = isSafari ? 1 : 0.9
+        const available = window.innerWidth - rightPanelsWidth - el.getBoundingClientRect().left - 10
+        el.style.width = `${Math.max(available / zoom - topBarStyle.paddingLeft, 300)}px`
+      }}>
       <div style={{
         width: "100%",
         padding: "10px 20px",
@@ -20417,6 +20199,8 @@ const AngularWorkflow = (defaultprops) => {
           flexDirection: "row",
           alignItems: "flex-start",
           justifyContent: "space-between",
+          flexWrap: compactBar ? "wrap" : "nowrap",
+          gap: compactBar ? 8 : 0,
           width: "100%",
           position: "relative",
         }}>
@@ -20434,19 +20218,13 @@ const AngularWorkflow = (defaultprops) => {
               cursor: "pointer",
               display: "flex",
               borderRadius: theme.palette.borderRadius,
-              border: hovered ? "1px solid rgba(255,255,255,0.3)" : "1px solid transparent",
               paddingRight: 10,
               paddingLeft: 10,
               position: "relative",
               height: 40,
               alignItems: "center",
             }}
-              onMouseEnter={() => {
-                setHovered(true)
-              }}
-              onMouseLeave={() => {
-                setHovered(false)
-              }}
+              sx={{ border: "1px solid transparent", "&:hover": { borderColor: "rgba(255,255,255,0.3)" } }}
               onClick={() => {
                 setEditWorkflowModalOpen(true)
                 setLastSaved(false)
@@ -20523,7 +20301,7 @@ const AngularWorkflow = (defaultprops) => {
   
           {/* Center: Build/Debug Toggle */}
           {workflow.public === true ? null : (
-          	<div style={{
+          	<div style={compactBar ? { zIndex: 1 } : {
                 position: "absolute",
                 left: "50%",
                 transform: "translateX(-50%)",
@@ -20539,6 +20317,8 @@ const AngularWorkflow = (defaultprops) => {
                       if (newMode === "debug") {
                         setExecutionModalOpen(true);
                         getWorkflowExecution(workflow.id, "", executionFilter, workflow.org_id)
+                      } else {
+                        setExecutionModalOpen(false)
                       }
 
                       trackFunnel(`${newMode}_mode_click`)
@@ -20568,7 +20348,7 @@ const AngularWorkflow = (defaultprops) => {
                     <ToggleButton
                       key={value}
                       value={value}
-                      sx={toggleButtonSx}
+                      sx={compactBar ? { ...toggleButtonSx, padding: "8px 16px" } : toggleButtonSx}
                     >
                       <img
                         src={themeMode !== "dark" ? darkIcon : icon}
@@ -20603,14 +20383,15 @@ const AngularWorkflow = (defaultprops) => {
                     verticalAlign: "middle",
                     flexShrink: 0,
                     cursor: "pointer",
-                    position: "relative",
                     zIndex: 100,
-                     position: "absolute",
-                    left: "47%",
-                    transform: "translateX(-50%)",
-                    top: 45,
-                    marginTop: 5,
-					marginLeft: 50, 
+                    ...(compactBar ? { position: "relative" } : {
+                      position: "absolute",
+                      left: "47%",
+                      transform: "translateX(-50%)",
+                      top: 45,
+                      marginTop: 5,
+                      marginLeft: 50,
+                    }),
 					minWidth: 170, 
 					maxWidth: 170, 
                   }}
@@ -21443,14 +21224,14 @@ const AngularWorkflow = (defaultprops) => {
       })
     }
 
-    const tightHeaderWidth = (bodyWidth - leftBarSize) < 1200
+    const tightHeaderWidth = (bodyWidth - leftBarSize - rightPanelsWidth) < 1200
 
     const enableSubOrgButton = userdata !== undefined && userdata !== null && userdata?.orgs !== undefined && userdata?.orgs !== null && userdata?.orgs?.length > 1 && workflow?.id !== undefined && workflow?.id && workflow?.id?.length > 0 && userdata?.active_org?.creator_org?.length === 0 && userdata?.active_org?.id == workflow?.org_id
 
     const avatarsTop = tightHeaderWidth
       ? (enableSubOrgButton ? 120 : 70)
       : (enableSubOrgButton ? 17 : 23)
-    const avatarsRight = tightHeaderWidth ? 12 : 254
+    const avatarsRight = (tightHeaderWidth ? 12 : 254) + rightPanelsWidth
 
     return (
       <div style={{
@@ -21931,6 +21712,76 @@ const AngularWorkflow = (defaultprops) => {
 
     const iconSvgSize = 21;
 
+    // Narrow canvas: secondary tools fold into a "More" menu so the bar stays one row; very narrow also drops the Save label
+    const compact = bottomBarSpace !== null && bottomBarSpace.width < bottomBarFullWidthRef.current + 32
+    const tight = bottomBarSpace !== null && bottomBarSpace.width < 500
+
+    const iconSrc = (dark, light) => themeMode === "dark" ? `/icons/workflow-page/${dark}.svg` : `/icons/workflow-page/${light}.svg`
+    const undoDisabled = history.length === 0 || !(originalWorkflow.suborg_distribution === undefined || originalWorkflow.suborg_distribution === null || originalWorkflow.suborg_distribution.length === 0 || originalWorkflow.suborg_distribution.includes("none"))
+    const toolGroups = [
+      [
+        {
+          label: "Download workflow",
+          src: iconSrc("download", "download-dark"),
+          onClick: () => {
+            const linkElement = document.createElement("a");
+            linkElement.setAttribute("href", "data:application/json;charset=utf-8," + encodeURIComponent(JSON.stringify(workflow)));
+            linkElement.setAttribute("download", workflow.name + ".json");
+            linkElement.click();
+          },
+        },
+        { label: "Undo", src: iconSrc("undo", "undo-dark"), disabled: undoDisabled, onClick: () => handleHistoryUndo(history) },
+        { label: "Fit to screen", src: iconSrc("fitToScreen", "fitToScreen-dark"), onClick: () => cy.fit(null, 50) },
+        {
+          label: "Remove selected item",
+          shortcut: "Del",
+          src: iconSrc("deleteIcon", "delete-dark"),
+          disabled: workflow.public,
+          onClick: () => {
+            const selectedNode = cy.$(":selected");
+            if (selectedNode.data() === undefined) {
+              return;
+            }
+            removeNode(selectedNode.data("id"));
+          },
+        },
+      ],
+      [
+        { label: "Revision history", shortcut: "Ctrl + ]", src: iconSrc("historyClock", "historyClock-dark"), disabled: workflow.public, onClick: () => setShowWorkflowRevisions(true) },
+        { label: "Add comment", src: iconSrc("comment", "comment-dark"), disabled: workflow.public, onClick: () => addCommentNode() },
+      ],
+      userdata?.support === true ? [
+        { label: "Simplified YAML (support only)", src: iconSrc("yaml", "yaml-dark"), disabled: workflow.public, onClick: () => setupWorkflowYaml(workflow) },
+      ] : [],
+    ].filter((group) => group.length > 0)
+
+    const toolButtonSx = {
+      width: toolbarHeight,
+      height: toolbarHeight,
+      color: theme.palette.text.primary,
+      "&:hover": {
+        backgroundColor: "rgba(255, 255, 255, 0.05)",
+      },
+      "&:disabled": {
+        color: "#9E9E9E",
+      },
+    }
+
+    const toolDivider = (key) => (
+      <Divider
+        key={key}
+        orientation="vertical"
+        flexItem
+        sx={{
+          marginLeft: "4px",
+          marginRight: "4px",
+          borderColor: "rgba(255, 255, 255, 0.2)",
+          height: 24,
+          alignSelf: "center",
+        }}
+      />
+    )
+
     // Play/Stop button
     const executionButton = executionRunning ? (
       <Tooltip color="primary" title="Stop execution" placement="top">
@@ -21981,7 +21832,7 @@ const AngularWorkflow = (defaultprops) => {
     );
 
     return (
-      <div style={bottomBarStyle}>
+      <div style={bottomBarStyle} ref={setBottomBarEl} data-compact={compact}>
         <Box
           sx={{
             display: "flex",
@@ -22042,7 +21893,7 @@ const AngularWorkflow = (defaultprops) => {
               disabled={isMobile || workflow.public || executionRunning}
               onBlur={(e) => setExecutionText(e.target.value)}
               sx={{
-                minWidth: 160,
+                width: tight ? 120 : compact ? 150 : 180,
                 maxHeight: 38,
                 height: toolbarHeight,
                 marginLeft: "8px",
@@ -22161,308 +22012,100 @@ const AngularWorkflow = (defaultprops) => {
                   {saveIcon} 
                 </span>
               )}
-              <Typography variant="body2" sx={{ fontSize: 14, color: "#ff8544" }}>
-                Save
-              </Typography>
+              {tight ? null : (
+                <Typography variant="body2" sx={{ fontSize: 14, color: "#ff8544" }}>
+                  Save
+                </Typography>
+              )}
             </Button>
             </span>
           </Tooltip>
 
-          {/* Separator */}
-          <Divider
-            orientation="vertical"
-            flexItem
-            sx={{
-              marginLeft: "8px",
-              marginRight: "4px",
-              borderColor: "rgba(255, 255, 255, 0.2)",
-              height: 24,
-              alignSelf: "center",
-            }}
-          />
+          {toolDivider("save-divider")}
 
-          <Box sx={{ display: "flex", alignItems: "center", gap: 0, marginLeft: "4px" }}>
-            {/* Download */}
-              <Tooltip
-                color="secondary"
-                title="Download workflow"
-                placement="top"
-              >
+          {compact ? (
+            <>
+              <Tooltip color="secondary" title="More tools" placement="top">
                 <IconButton
-                  onClick={() => {
-                    const data = workflow;
-                    let exportFileDefaultName = data.name + ".json";
-                    let dataStr = JSON.stringify(data);
-                    let dataUri =
-                    "data:application/json;charset=utf-8," + encodeURIComponent(dataStr);
-                    let linkElement = document.createElement("a");
-                    linkElement.setAttribute("href", dataUri);
-                    linkElement.setAttribute("download", exportFileDefaultName);
-                    linkElement.click();
-                  }}
-                  sx={{
-                    width: toolbarHeight,
-                    height: toolbarHeight,
-                    color: theme.palette.text.primary,
-                    "&:hover": {
-                      backgroundColor: "rgba(255, 255, 255, 0.05)",
-                    },
-                  }}
+                  aria-label="More tools"
+                  aria-haspopup="menu"
+                  onClick={(event) => setBottomMoreAnchor(event.currentTarget)}
+                  sx={toolButtonSx}
                 >
-                  <img
-                    src={themeMode === "dark" ? "/icons/workflow-page/download.svg" : "/icons/workflow-page/download-dark.svg"}
-                    alt="Download"
-                    style={{ width: iconSvgSize, height: iconSvgSize }}
-                    draggable={false}
-                  />
+                  <MoreHorizIcon sx={{ fontSize: 22 }} />
                 </IconButton>
               </Tooltip>
-
-            {/* Undo */}
-            <Tooltip color="secondary" title="Undo" placement="top">
-              <IconButton
-                disabled={history.length === 0 || !(originalWorkflow.suborg_distribution === undefined || originalWorkflow.suborg_distribution === null || originalWorkflow.suborg_distribution.length === 0 || originalWorkflow.suborg_distribution.includes("none"))}
-                onClick={(event) => handleHistoryUndo(history)}
-                sx={{
-                  width: toolbarHeight,
-                  height: toolbarHeight,
-                  color: theme.palette.text.primary,
-                  "&:hover": {
-                    backgroundColor: "rgba(255, 255, 255, 0.05)",
-                  },
-                  "&:disabled": {
-                    color: "#9E9E9E",
-                  },
-                }}
+              <Menu
+                anchorEl={bottomMoreAnchor}
+                open={Boolean(bottomMoreAnchor)}
+                onClose={() => setBottomMoreAnchor(null)}
+                anchorOrigin={{ vertical: "top", horizontal: "center" }}
+                transformOrigin={{ vertical: "bottom", horizontal: "center" }}
+                slotProps={{ paper: { sx: { marginTop: "-8px", minWidth: 220 } } }}
               >
-                <img 
-                  src={themeMode === "dark" ? "/icons/workflow-page/undo.svg" : "/icons/workflow-page/undo-dark.svg"}
-                  alt="Undo" 
-                  style={{ 
-                    width: iconSvgSize, 
-                    height: iconSvgSize, 
-                    opacity: (history.length === 0 || !(originalWorkflow.suborg_distribution === undefined || originalWorkflow.suborg_distribution === null || originalWorkflow.suborg_distribution.length === 0 || originalWorkflow.suborg_distribution.includes("none"))) ? 0.5 : 1 
-                  }}
-                  draggable={false} 
-                />
-              </IconButton>
-            </Tooltip>
+                {toolGroups.flatMap((group, groupIndex) => [
+                  groupIndex > 0 ? <Divider key={`menu-divider-${groupIndex}`} /> : null,
+                  ...group.map((tool) => (
+                    <MenuItem
+                      key={tool.label}
+                      disabled={tool.disabled}
+                      onClick={() => {
+                        setBottomMoreAnchor(null)
+                        tool.onClick()
+                      }}
+                      sx={{ gap: 1.5, fontSize: 14 }}
+                    >
+                      <img src={tool.src} alt="" style={{ width: 18, height: 18 }} draggable={false} />
+                      <span style={{ flex: 1 }}>{tool.label}</span>
+                      {tool.shortcut ? (
+                        <Typography variant="body2" sx={{ fontSize: 12, opacity: 0.6, marginLeft: 2 }}>
+                          {tool.shortcut}
+                        </Typography>
+                      ) : null}
+                    </MenuItem>
+                  )),
+                ])}
+              </Menu>
+            </>
+          ) : (
+            <Box sx={{ display: "flex", alignItems: "center", gap: 0, marginLeft: "4px" }}>
+              {toolGroups.map((group, groupIndex) => (
+                <React.Fragment key={groupIndex}>
+                  {groupIndex > 0 ? toolDivider(`tool-divider-${groupIndex}`) : null}
+                  {group.map((tool) => (
+                    <Tooltip
+                      key={tool.label}
+                      color="secondary"
+                      title={tool.shortcut ? `${tool.label} (${tool.shortcut})` : tool.label}
+                      placement="top"
+                    >
+                      <span>
+                        <IconButton aria-label={tool.label} disabled={tool.disabled} onClick={tool.onClick} sx={toolButtonSx}>
+                          <img
+                            src={tool.src}
+                            alt=""
+                            style={{ width: iconSvgSize, height: iconSvgSize, opacity: tool.disabled ? 0.5 : 1 }}
+                            draggable={false}
+                          />
+                        </IconButton>
+                      </span>
+                    </Tooltip>
+                  ))}
+                </React.Fragment>
+              ))}
+            </Box>
+          )}
 
-            {/* Fit to Screen */}
-            <Tooltip color="secondary" title="Fit to screen" placement="top">
-              <IconButton
-                onClick={() => cy.fit(null, 50)}
-                sx={{
-                  width: toolbarHeight,
-                  height: toolbarHeight,
-                  color: theme.palette.text.primary,
-                  "&:hover": {
-                    backgroundColor: "rgba(255, 255, 255, 0.05)",
-                  },
-                }}
-              >
-                <img 
-                  src={themeMode === "dark" ? "/icons/workflow-page/fitToScreen.svg" : "/icons/workflow-page/fitToScreen-dark.svg"}
-                  alt="Fit to Screen" 
-                  style={{ 
-                    width: iconSvgSize, 
-                    height: iconSvgSize, 
-                  }} 
-                  draggable={false}
-                />
-              </IconButton>
-            </Tooltip>
-
-            {/* Delete/Trash */}
-            <Tooltip
-              color="secondary"
-              title="Remove selected item (del)"
-              placement="top"
-            >
-              <IconButton
-                disabled={workflow.public}
-                onClick={() => {
-                  const selectedNode = cy.$(":selected");
-                  if (selectedNode.data() === undefined) {
-                    return;
-                  }
-                  removeNode(selectedNode.data("id"));
-                }}
-                sx={{
-                  width: toolbarHeight,
-                  height: toolbarHeight,
-                  color: theme.palette.text.primary,
-                  "&:hover": {
-                    backgroundColor: "rgba(255, 255, 255, 0.05)",
-                  },
-                  "&:disabled": {
-                    color: "#9E9E9E",
-                  },
-                }}
-              >
-                <img
-                  src={themeMode === "dark" ? "/icons/workflow-page/deleteIcon.svg" : "/icons/workflow-page/delete-dark.svg"}
-                  alt="Delete"
-                  style={{ width: iconSvgSize, height: iconSvgSize }}
-                  draggable={false}
-                />
-              </IconButton>
-            </Tooltip>
-
-            {/* Separator */}
-            <Divider
-              orientation="vertical"
-              flexItem
-              sx={{
-                marginLeft: "4px",
-                marginRight: "4px",
-                borderColor: "rgba(255, 255, 255, 0.2)",
-                height: 24,
-                alignSelf: "center",
-              }}
-            />
-
-            {/* History */}
-            <Tooltip
-              color="secondary"
-              title="Show Workflow Revision History (Ctrl + ])"
-              placement="top"
-            >
-              <IconButton
-                disabled={workflow.public}
-                onClick={() => setShowWorkflowRevisions(true)}
-                sx={{
-                  width: toolbarHeight,
-                  height: toolbarHeight,
-                  color: theme.palette.text.primary,
-                  "&:hover": {
-                    backgroundColor: "rgba(255, 255, 255, 0.05)",
-                  },
-                  "&:disabled": {
-                    color: "#9E9E9E",
-                  },
-                }}
-              >
-                <img
-                  src={themeMode === "dark" ? "/icons/workflow-page/historyClock.svg" : "/icons/workflow-page/historyClock-dark.svg"}
-                  alt="History"
-                  style={{ width: iconSvgSize, height: iconSvgSize }}
-                />
-              </IconButton>
-            </Tooltip>
-
-            {/* Add */}
-            <Tooltip
-              color="secondary"
-              title="Add comment"
-              placement="top"
-            >
-              <IconButton
-                disabled={workflow.public}
-                onClick={() => addCommentNode()}
-                sx={{
-                  width: toolbarHeight,
-                  height: toolbarHeight,
-                  color: theme.palette.text.primary,
-                  "&:hover": {
-                    backgroundColor: "rgba(255, 255, 255, 0.05)",
-                  },
-                  "&:disabled": {
-                    color: "#9E9E9E",
-                  },
-                }}
-              >
-                <img
-                  src={themeMode === "dark" ? "/icons/workflow-page/comment.svg" : "/icons/workflow-page/comment-dark.svg"}
-                  alt="Add Comment"
-                  style={{ width: iconSvgSize, height: iconSvgSize }}
-                  draggable={false}
-                />
-              </IconButton>
-            </Tooltip>
-
-            {/* WorkflowMenu - was conditionally rendered in old code */}
-            {workflow.configuration !== null &&
-              workflow.configuration !== undefined &&
-              workflow.configuration.exit_on_error !== undefined ? (
-              <WorkflowMenu />
-            ) : null}
-
-            {/*
-          <Tooltip
-            color="secondary"
-            title="Edit workflow details"
-            placement="top"
-          >
-            <span>
-              <Button
-                disabled={workflow.public}
-                color="secondary"
-			  	variant="text"
-                style={{ width: 65, height: buttonHeights, }}
-                onClick={() => {
-                  console.log("SHOW EDIT VIEW!")
-
-                  setEditWorkflowModalOpen(true)
-  				  setLastSaved(false)
-                }}
-              >
-                <EditIcon />
-              </Button>
-            </span>
-          </Tooltip> 
-          */}
-
-            {userdata.support === true && (
-             <Divider
-                orientation="vertical"
-                flexItem
-                sx={{
-                  marginLeft: "4px",
-                  marginRight: "4px",
-                  borderColor: "rgba(255, 255, 255, 0.2)",
-                  height: 24,
-                  alignSelf: "center",
-                }}
-              /> 
-            )}
-
-            {userdata?.support === true && (
-              <Tooltip
-                color="secondary"
-                title="Show simplified YAML (support only)"
-                placement="top"
-              >
-                <IconButton
-                  disabled={workflow.public}
-                  onClick={() => setupWorkflowYaml(workflow)}
-                  sx={{
-                    width: toolbarHeight,
-                    height: toolbarHeight,
-                    color: theme.palette.text.primary,
-                    "&:hover": {
-                      backgroundColor: "rgba(255, 255, 255, 0.05)",
-                    },
-                    "&:disabled": {
-                      color: "#9E9E9E",
-                    },
-                  }}
-                >
-                  <img
-                    src={themeMode === "dark" ? "/icons/workflow-page/yaml.svg" : "/icons/workflow-page/yaml-dark.svg"}
-                    alt="YAML"
-                    style={{ width: iconSvgSize, height: iconSvgSize }}
-                    draggable={false}
-                  />
-                </IconButton>
-              </Tooltip>
-            )}
-          </Box>
+          {workflow.configuration !== null &&
+            workflow.configuration !== undefined &&
+            workflow.configuration.exit_on_error !== undefined ? (
+            <WorkflowMenu />
+          ) : null}
 
           {/* AI Button with Gradient */}
             <Tooltip
               color="secondary"
-              title="Edit the workflow with the AI Agnet"
+              title="Chat with the agent about this workflow"
               placement="top"
             >
               <Button
@@ -22688,7 +22331,7 @@ const AngularWorkflow = (defaultprops) => {
         :
         <span>
           {/*<Fade in={true} style={{ transitionDelay: `$0ms` }}>*/}
-          <div id="rightside_actions" style={rightsidebarStyle}>
+          <div id="rightside_actions" style={configHidden ? { ...rightsidebarStyle, display: "none" } : rightsidebarStyle}>
             {defaultReturn}
           </div>
         </span>
@@ -23712,7 +23355,8 @@ const AngularWorkflow = (defaultprops) => {
   const executionModal = (
     <Drawer
       anchor={"right"}
-      open={executionModalOpen}
+      open={executionModalOpen && (!docked || shownTab === "run")}
+      transitionDuration={docked ? 0 : undefined}
       onClose={() => {
         setExecutionModalOpen(false)
         setBuildDebugMode("build")
@@ -23720,11 +23364,11 @@ const AngularWorkflow = (defaultprops) => {
         //navigate(curpath + newitem)
       }}
       style={{
-        resize: "both",
+        resize: docked ? "none" : "both",
         overflow: "auto",
       }}
       hideBackdrop={false}
-      variant="temporary"
+      variant={docked ? "persistent" : "temporary"}
       BackdropProps={{
         style: {
           //backgroundColor: "transparent",
@@ -23732,17 +23376,18 @@ const AngularWorkflow = (defaultprops) => {
       }}
       PaperProps={{
         style: {
-          resize: "both",
+          resize: docked ? "none" : "both",
           overflow: "auto",
-          minWidth: isMobile ? "100%" : 490,
-          maxWidth: isMobile ? "100%" : 490,
+          minWidth: isMobile ? "100%" : dockWidth,
+          maxWidth: isMobile ? "100%" : dockWidth,
           color: theme.palette.text.primary,
           fontSize: 18,
           borderLeft: theme.palette.defaultBorder,
 
-          borderRadius: theme.palette.borderRadius,
+          borderRadius: docked ? 0 : theme.palette.borderRadius,
           borderTopRightRadius: 0,
           borderBottomRightRadius: 0,
+          ...(docked ? { zIndex: 1200, top: dockTabHeight, height: `calc(100% - ${dockTabHeight}px)` } : {}),
           backgroundColor: themeMode === "dark" ? "black" : theme.palette.drawer.backgroundColor,
         },
       }}
@@ -23795,7 +23440,7 @@ const AngularWorkflow = (defaultprops) => {
           </div>
 
 		  {executionTimeline?.length > 0 && 
-		  	<div style={{borderTop: "1px solid rgba(255,255,255,0.3)", position: "fixed", bottom: 0, zIndex: 13000, width: 460, right: 10, padding: "0px 10px 0px 10px", backgroundColor: theme.palette.drawer.backgroundColor, }}>
+		  	<div style={{borderTop: "1px solid rgba(255,255,255,0.3)", position: "fixed", bottom: 0, zIndex: 13000, width: dockWidth - 30, right: 10, padding: "0px 10px 0px 10px", backgroundColor: theme.palette.drawer.backgroundColor, }}>
 			  <LineChartWrapper 
 				inputname={""}
 				keys={executionTimeline}
@@ -25712,11 +25357,10 @@ const AngularWorkflow = (defaultprops) => {
         {/*isMobile ? null : leftView*/}
         {leftView}
         
-        {userdata.support === true && (
+        {!isMobile && workflow.public !== true && (
         <div style={{ position: "relative" }}>
           <div
             onClick={() => {
-              console.log("Toggle sidebar!")
               setLeftBarSize(leftViewOpen ? 0 : 235)
               setLeftViewOpen(!leftViewOpen)
             }}
@@ -25832,6 +25476,7 @@ const AngularWorkflow = (defaultprops) => {
                   }, { passive: false });
                 }
 
+                window.cy = incy;
                 setCy(incy);
               }}
             />
@@ -25850,10 +25495,11 @@ const AngularWorkflow = (defaultprops) => {
           rightSideBarOpen &&
           Object.getOwnPropertyNames(selectedTrigger || {}).length === 0 && 
           Object.getOwnPropertyNames(selectedComment || {}).length === 0 && 
-          Object.getOwnPropertyNames(selectedEdge || {}).length === 0
+          Object.getOwnPropertyNames(selectedEdge || {}).length === 0 &&
+          !configHidden
         }
         hideBackdrop={true}
-        transitionDuration={{ enter: 180, exit: 0 }}
+        transitionDuration={{ enter: docked ? 0 : 180, exit: 0 }}
         onClose={() => {
           setRightSideBarOpen(false);
           setSelectedAction({});
@@ -25874,6 +25520,7 @@ const AngularWorkflow = (defaultprops) => {
             minWidth: rightsidebarStyle.minWidth,
             maxWidth: rightsidebarStyle.maxWidth,
             overflow: "hidden",
+            ...(docked ? { top: dockTabHeight, height: `calc(100% - ${dockTabHeight}px)`, right: 0, width: dockWidth, minWidth: dockWidth, maxWidth: dockWidth } : {}),
           },
         }}
       >
@@ -25941,7 +25588,7 @@ const AngularWorkflow = (defaultprops) => {
       {/* {
         rightSideBarOpen && Object.getOwnPropertyNames(selectedAction).length > 0 ?
           <Fade in={true} timeout={250} style={{ transitionDelay: `${0}ms` }}>
-            <div id="rightside_actions" style={rightsidebarStyle}>
+            <div id="rightside_actions" style={configHidden ? { ...rightsidebarStyle, display: "none" } : rightsidebarStyle}>
               <ParsedAction
                 id="rightside_subactions"
                 files={files}
@@ -26008,7 +25655,7 @@ const AngularWorkflow = (defaultprops) => {
       {/* Only fixed the ones that require scrolling on a small screen */}
       {/* Most important: Actions. But these are a lot more complex */}
       {rightSideBarOpen && (selectedTrigger.trigger_type === "SCHEDULE" || selectedTrigger.trigger_type === "WEBHOOK" || selectedTrigger.trigger_type === "PIPELINE" || selectedTrigger.trigger_type === "USERINPUT" || selectedTrigger.trigger_type === "SUBFLOW") ?
-        <div id="rightside_actions" style={rightsidebarStyle}>
+        <div id="rightside_actions" style={configHidden ? { ...rightsidebarStyle, display: "none" } : rightsidebarStyle}>
           {Object.getOwnPropertyNames(selectedTrigger)?.length > 0 ?
             selectedTrigger.trigger_type === "SCHEDULE" ?
               ScheduleSidebar
@@ -26027,7 +25674,7 @@ const AngularWorkflow = (defaultprops) => {
       {/* 
     {
       rightSideBarOpen && selectedTrigger?.trigger_type === "SUBFLOW"&& Object.getOwnPropertyNames(selectedTrigger)?.length > 0   ? 
-      <div id="rightside_actions" style={rightsidebarStyle}>
+      <div id="rightside_actions" style={configHidden ? { ...rightsidebarStyle, display: "none" } : rightsidebarStyle}>
         <SubflowSidebar/>
         </div> : null
     } */}
@@ -26067,26 +25714,54 @@ const AngularWorkflow = (defaultprops) => {
       />
 	  */}
 
+      <WorkflowAgentSidebar
+        workflow={workflow}
+        cy={cy}
+        dock={dock}
+        theme={theme}
+        open={workflowGenerationModalOpen}
+        onOpenChange={setWorkflowGenerationModalOpen}
+        hidden={showWorkflowRevisions}
+        globalUrl={globalUrl}
+        themeMode={themeMode}
+        isLoggedIn={isLoggedIn}
+        userdata={userdata}
+        isSaved={() => lastSavedRef.current}
+        reloadWorkflow={() => getWorkflow(workflow.id, {}, true)}
+        saveWorkflow={() => saveWorkflow(workflow, undefined, undefined, undefined, true)}
+        onReverted={() => {
+          if (multiplayerEnabledRef.current && streamUrl) {
+            stream.sendWorkflowRewind(userdata?.username)
+          }
+        }}
+        onOpenExecution={openAgentExecution}
+        onPresenceRefresh={handleAgentPresenceRefresh}
+        onStopped={handleAgentStopped}
+        track={trackAgentFunnel}
+      />
+
       {showWorkflowRevisions ? null :
         <span>
           {ConnectedUsersAvatars()}
           {shownErrors}
-          {workflowGenerationModalOpen && (
-            <AgentChatWidget
-              globalUrl={globalUrl}
-              theme={theme}
-              widgetLeft={leftBarSize + (cytoscapeWidth / 2)}
-              workflowName={workflow?.name}
-              workflowId={workflow?.id}
-              workflow={workflow}
-              saveWorkflow={saveWorkflow}
-              onAgentStarted={handleAgentPresenceRefresh}
-              onAgentStopped={handleAgentStopped}
-              trackEvent={trackAgentFunnel}
-            />
-          )}
-          <BottomCytoscapeBar />
-          <TopCytoscapeBar />
+          <WorkflowDockTabs
+            dock={dock}
+            theme={theme}
+            themeMode={themeMode}
+            labels={{
+              agent: "Agent",
+              config: selectedAction.label || selectedTrigger.label
+                || (Object.getOwnPropertyNames(selectedComment || {}).length > 0 ? "Comment" : Object.getOwnPropertyNames(selectedEdge || {}).length > 0 ? "Branch" : "Configure"),
+              run: "Run",
+            }}
+            onClose={{
+              agent: () => setWorkflowGenerationModalOpen(false),
+              config: () => (cy ? cy.elements().unselect() : setRightSideBarOpen(false)),
+              run: closeDockedRunPanel,
+            }}
+          />
+          {BottomCytoscapeBar()}
+          {TopCytoscapeBar()}
           {/* <RightsideBar /> */}
         </span>
       }
@@ -26833,6 +26508,20 @@ const AngularWorkflow = (defaultprops) => {
   const foundIntegrationApp = selectedAction.app_id === "integration" || selectedAction.app_id === "shuffle_agent" ? selectedAction?.parameters?.find(param => param.name === "app_name") : undefined
   const authApp = !authenticationModalOpen ? undefined : foundIntegrationApp === undefined || (selectedApp.id !== "integration" && selectedApp.id !== "shuffle_agent") ? selectedApp : apps.find(app => app.name === foundIntegrationApp?.value) || selectedApp;
 
+  // authenticationType comes from the node's app; integration/agent nodes auth a different app, so use that app's type (e.g. OAuth2 for Google Sheets)
+  const authAppAuth = authApp?.authentication
+  const authAppType = authApp === undefined || authApp === selectedApp ? authenticationType :
+    authAppAuth?.type === "oauth2-app" || (authAppAuth?.type === "oauth2" && authAppAuth?.redirect_uri !== undefined && authAppAuth?.redirect_uri !== null) ? {
+      type: authAppAuth.type,
+      redirect_uri: authAppAuth.redirect_uri,
+      refresh_uri: authAppAuth.refresh_uri,
+      token_uri: authAppAuth.token_uri,
+      scope: authAppAuth.scope,
+      client_id: authAppAuth.client_id,
+      client_secret: authAppAuth.client_secret,
+      grant_type: authAppAuth.grant_type,
+    } : { type: "" }
+
   const authenticationModal = authenticationModalOpen ? (
     <Dialog
       PaperComponent={PaperComponent}
@@ -26989,13 +26678,13 @@ const AngularWorkflow = (defaultprops) => {
             backgroundColor: theme.palette.DialogStyle.backgroundColor,
           }}
         >
-          {authenticationType.type === "oauth2" || authenticationType.type === "oauth2-app" ?
+          {authAppType.type === "oauth2" || authAppType.type === "oauth2-app" ?
             <AuthenticationOauth2
               saveWorkflow={saveWorkflow}
               selectedApp={authApp}
               workflow={workflow}
               selectedAction={selectedAction}
-              authenticationType={authenticationType}
+              authenticationType={authAppType}
               getAppAuthentication={getAppAuthentication}
               appAuthentication={appAuthentication}
               setSelectedAction={setSelectedAction}
